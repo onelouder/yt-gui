@@ -12,10 +12,23 @@ const MODE_HINTS = {
   video: 'Video stream only — the file will have no audio track.',
 };
 
-const AUDIO_HINTS = {
-  mp3: 'Audio is re-encoded to MP3 with ffmpeg after downloading.',
-  wav: 'Audio is decoded to uncompressed WAV with ffmpeg — expect ~10 MB per minute.',
+const AUDIO_DESC = {
+  native: 'no re-encode',
+  mp3: 'lossy',
+  wav: 'uncompressed',
 };
+
+const AUDIO_HINTS = {
+  native: 'The audio stream is saved exactly as the site serves it (usually .webm or .m4a).',
+  mp3: 'Re-encoded to MP3 with ffmpeg after downloading. Best = LAME VBR V0 (~245 kbps); fixed bitrates are CBR.',
+  wav: 'Decoded to uncompressed 16-bit WAV with ffmpeg — about 10 MB per minute.',
+};
+
+const BEST_LABEL = {
+  mp3: 'Best (VBR ~245 kbps)',
+};
+
+const audioFormat = (key) => config?.audio_formats?.find((f) => f.key === key);
 
 // --------------------------------------------------------------------- utils
 function fmtBytes(n) {
@@ -57,10 +70,18 @@ async function loadConfig() {
 
   if (!$('outdir').value) $('outdir').value = config.default_outdir;
 
-  if (!config.ffmpeg || !config.ffprobe) {
-    $('audio-format').querySelectorAll('option:not([value=native])').forEach((o) => { o.disabled = true; });
-    $('audio-format').value = 'native';
-  }
+  const canConvert = config.ffmpeg && config.ffprobe;
+  $('audio-format').replaceChildren(...config.audio_formats.map((f) => {
+    const o = el('option', null, AUDIO_DESC[f.key] ? `${f.label} (${AUDIO_DESC[f.key]})` : f.label);
+    o.value = f.key;
+    o.disabled = f.convert && !canConvert;
+    return o;
+  }));
+  $('audio-quality').replaceChildren(...config.audio_qualities.map((q) => {
+    const o = el('option', null, q.label);
+    o.value = q.key;
+    return o;
+  }));
 
   if (!config.ffmpeg) {
     const merged = form.querySelector('input[value="merged"]');
@@ -81,11 +102,17 @@ function syncMode() {
   const mode = currentMode();
   let hint = MODE_HINTS[mode];
   if (mode === 'merged' && !config?.ffmpeg) hint = 'ffmpeg was not found on PATH, so merged mode is unavailable.';
-  const audioFmt = $('audio-format');
-  const hasAudioFile = mode === 'audio' || mode === 'separate';
-  audioFmt.disabled = !hasAudioFile;
-  if (hasAudioFile && AUDIO_HINTS[audioFmt.value]) hint += ` ${AUDIO_HINTS[audioFmt.value]}`;
   $('mode-hint').textContent = hint;
+
+  const hasAudioFile = mode === 'audio' || mode === 'separate';
+  const fmt = audioFormat($('audio-format').value);
+  $('audio-format').disabled = !hasAudioFile;
+  $('audio-quality').disabled = !hasAudioFile || !fmt?.bitrate_ok;
+  const best = $('audio-quality').querySelector('option[value=best]');
+  if (best) best.textContent = BEST_LABEL[fmt?.key] || 'Best';
+  let audioHint = hasAudioFile ? (AUDIO_HINTS[fmt?.key] || '') : 'Audio format applies to Audio only and Separate modes.';
+  if (hasAudioFile && config && !(config.ffmpeg && config.ffprobe)) audioHint += ' Conversion needs ffmpeg and ffprobe on PATH.';
+  $('audio-hint').textContent = audioHint;
   $('quality').disabled = mode === 'audio';
 }
 
@@ -132,7 +159,7 @@ function renderJob(job) {
   card.append(head);
 
   const q = job.mode === 'audio' ? 'best audio' : job.quality === 'best' ? 'best' : `${job.quality}p`;
-  const af = job.audio_format && job.audio_format !== 'native' ? ` · ${job.audio_format_label}` : '';
+  const af = job.audio_format && job.audio_format !== 'native' ? ` · ${job.audio_label}` : '';
   card.append(el('p', 'job-sub', `${job.mode_label} · ${q}${af} · ${job.outdir}`));
   if (job.title) card.append(el('p', 'job-sub', job.url));
 
@@ -158,6 +185,7 @@ function renderJob(job) {
     form.querySelector(`input[value="${job.mode}"]`).checked = true;
     $('quality').value = job.quality;
     $('audio-format').value = job.audio_format || 'native';
+    $('audio-quality').value = job.audio_quality || 'best';
     $('outdir').value = job.outdir;
     syncMode();
     $('url').focus();
@@ -198,7 +226,7 @@ async function poll() {
 
 // --------------------------------------------------------------------- form
 form.addEventListener('change', (e) => {
-  if (e.target.name === 'mode' || e.target.name === 'audio_format') syncMode();
+  if (['mode', 'audio_format'].includes(e.target.name)) syncMode();
 });
 
 $('reset-path').addEventListener('click', () => {
@@ -218,6 +246,7 @@ form.addEventListener('submit', async (e) => {
     mode: currentMode(),
     quality: $('quality').value,
     audio_format: $('audio-format').value,
+    audio_quality: $('audio-quality').value,
     outdir: $('outdir').value.trim(),
   };
 

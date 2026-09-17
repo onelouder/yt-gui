@@ -87,6 +87,33 @@ class PlanTests(Base):
                 self.assertTrue(all("-x" not in a for a in self.argvs(job)))
 
 
+class BitrateTests(Base):
+    def quality_arg(self, **kw):
+        argv = self.argvs(self.job(mode="audio", **kw))[0]
+        return argv[argv.index("--audio-quality") + 1] if "--audio-quality" in argv else None
+
+    def test_mp3_bitrates(self):
+        self.assertEqual(self.quality_arg(audio_format="mp3"), "0")
+        for q in ("320", "192", "128"):
+            with self.subTest(q=q):
+                self.assertEqual(self.quality_arg(audio_format="mp3", audio_quality=q), f"{q}K")
+
+    def test_bitrate_ignored_where_meaningless(self):
+        for fmt in ("wav", "native"):
+            with self.subTest(fmt=fmt):
+                job = self.job(mode="audio", audio_format=fmt, audio_quality="320")
+                self.assertEqual(job.audio_quality, "best")
+                self.assertIsNone(self.quality_arg(audio_format=fmt, audio_quality="320"))
+
+    def test_unknown_bitrate_rejected(self):
+        with self.assertRaises(ValueError):
+            self.job(mode="audio", audio_format="mp3", audio_quality="999")
+
+    def test_labels(self):
+        self.assertEqual(self.job(mode="audio", audio_format="mp3", audio_quality="192").to_dict()["audio_label"], "MP3 192k")
+        self.assertEqual(self.job(mode="audio", audio_format="wav").to_dict()["audio_label"], "WAV")
+
+
 class ValidationTests(Base):
     def assertRejected(self, **kw):
         with self.assertRaises(ValueError):

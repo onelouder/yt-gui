@@ -48,14 +48,30 @@ POSTPROC_TMPL = "postprocess:" + PP + "%(progress.status)s|%(progress.postproces
 MODES = ("merged", "separate", "audio", "video")
 QUALITIES = {"best": None, "1080": 1080, "720": 720, "480": 480}
 
+@dataclass(frozen=True)
+class AudioFormat:
+    key: str
+    label: str
+    codec: str | None        # yt-dlp --audio-format value; None = keep the source stream
+    lossless: bool = False
+    best: str | None = None  # --audio-quality for "best"; None = let the encoder decide
+
+    @property
+    def bitrate_ok(self) -> bool:
+        return self.codec is not None and not self.lossless
+
+
 # Audio output: "native" keeps the source stream as-is; the rest are re-encoded by
-# ffmpeg via yt-dlp's -x (FFmpegExtractAudio). mp3 uses LAME VBR V0 (~245 kbps).
-AUDIO_FORMATS = {
-    "native": None,
-    "mp3": ["-x", "--audio-format", "mp3", "--audio-quality", "0"],
-    "wav": ["-x", "--audio-format", "wav"],
-}
-AUDIO_FORMAT_LABELS = {"native": "Original", "mp3": "MP3", "wav": "WAV"}
+# ffmpeg via yt-dlp's -x (FFmpegExtractAudio).
+AUDIO_FORMATS = {f.key: f for f in (
+    AudioFormat("native", "Original", None),
+    AudioFormat("mp3", "MP3", "mp3", best="0"),  # LAME VBR V0, ~245 kbps
+    AudioFormat("wav", "WAV", "wav", lossless=True),
+)}
+
+# Values over 10 make yt-dlp pass `-b:a <n>k` (constant bitrate).
+AUDIO_QUALITIES = {"best": None, "320": "320K", "192": "192K", "128": "128K"}
+AUDIO_QUALITY_LABELS = {"best": "Best", "320": "320 kbps", "192": "192 kbps", "128": "128 kbps"}
 
 MODE_LABELS = {
     "merged": "Merged file",
@@ -164,12 +180,13 @@ class Task:
 
 
 class Job:
-    def __init__(self, url, mode, quality, audio_format, outdir: Path):
+    def __init__(self, url, mode, quality, audio_format, audio_quality, outdir: Path):
         self.id = uuid.uuid4().hex[:12]
         self.url = url
         self.mode = mode
         self.quality = quality
         self.audio_format = audio_format
+        self.audio_quality = audio_quality
         self.outdir = str(outdir)
         self.title = None
         self.state = "queued"
@@ -206,7 +223,9 @@ class Job:
             "mode_label": MODE_LABELS.get(self.mode, self.mode),
             "quality": self.quality,
             "audio_format": self.audio_format,
-            "audio_format_label": AUDIO_FORMAT_LABELS.get(self.audio_format, self.audio_format),
+            "audio_format_label": AUDIO_FORMATS[self.audio_format].label,
+            "audio_quality": self.audio_quality,
+            "audio_label": audio_label(self.audio_format, self.audio_quality),
             "outdir": self.outdir,
             "title": self.title,
             "state": self.state,
@@ -478,13 +497,29 @@ AUDIO_SELECTOR = (
 )
 
 
+def audio_label(fmt_key: str, quality: str) -> str:
+    fmt = AUDIO_FORMATS[fmt_key]
+    if not fmt.bitrate_ok:
+        return fmt.label
+    return f"{fmt.label} {'best' if quality == 'best' else quality + 'k'}"
+
+
+def extract_argv(fmt: AudioFormat, quality: str) -> list[str]:
+    argv = ["-x", "--audio-format", fmt.codec]
+    q = fmt.best if quality == "best" else AUDIO_QUALITIES[quality]
+    if fmt.bitrate_ok and q:
+        argv += ["--audio-quality", q]
+    return argv
+
+
 def audio_step(job: Job) -> Step:
-    convert = AUDIO_FORMATS[job.audio_format]
-    if convert:
-        t = Task("audio", f"Audio \u2192 {AUDIO_FORMAT_LABELS[job.audio_format]}", "converting")
-        # -x picks the final extension itself, so %(ext)s ends up .mp3/.wav
-        # converting: any file with an audio track will do, ffmpeg drops the video
-        return Step(t, f"{AUDIO_SELECTOR}/best", f"{STEM}.audio.%(ext)s", list(convert))
+    fmt = AUDIO_FORMATS[job.audio_format]
+    if fmt.codec:
+        t = Task("audio", f"Audio \u2192 {audio_label(fmt.key, job.audio_quality)}", "converting")
+        # -x picks the final extension itself, so %(ext)s ends up .mp3/.wav.
+        # Any file with an audio track will do; ffmpeg drops the video.
+        return Step(t, f"{AUDIO_SELECTOR}/best", f"{STEM}.audio.%(ext)s",
+                    extract_argv(fmt, job.audio_quality))
     return Step(Task("audio", "Audio"), AUDIO_SELECTOR, f"{STEM}.audio.%(ext)s")
 
 
@@ -562,6 +597,7 @@ def new_job(data: dict) -> Job:
     mode = str(data.get("mode") or "merged")
     quality = str(data.get("quality") or "best")
     audio_format = str(data.get("audio_format") or "native")
+    audio_quality = str(data.get("audio_quality") or "best")
     outdir_raw = str(data.get("outdir") or "")
 
     if not url:
@@ -577,15 +613,19 @@ def new_job(data: dict) -> Job:
         raise ValueError("Merged mode needs ffmpeg, which was not found on PATH.")
     if audio_format not in AUDIO_FORMATS:
         raise ValueError(f"Unknown audio format: {audio_format}")
+    if audio_quality not in AUDIO_QUALITIES:
+        raise ValueError(f"Unknown audio quality: {audio_quality}")
     if mode not in ("audio", "separate"):
         audio_format = "native"  # only audio outputs are converted
-    if AUDIO_FORMATS[audio_format] and not (FFMPEG and FFPROBE):
+    if not AUDIO_FORMATS[audio_format].bitrate_ok:
+        audio_quality = "best"  # lossless or untouched: a bitrate means nothing
+    if AUDIO_FORMATS[audio_format].codec and not (FFMPEG and FFPROBE):
         raise ValueError(
-            f"Converting to {AUDIO_FORMAT_LABELS[audio_format]} needs ffmpeg and ffprobe on PATH."
+            f"Converting to {AUDIO_FORMATS[audio_format].label} needs ffmpeg and ffprobe on PATH."
         )
 
     outdir = validate_outdir(outdir_raw or str(DEFAULT_OUTDIR))
-    job = Job(url, mode, quality, audio_format, outdir)
+    job = Job(url, mode, quality, audio_format, audio_quality, outdir)
     job.plan = build_plan(job)
     job.tasks = [step.task for step in job.plan]
     return job
@@ -753,7 +793,12 @@ def config_payload():
         "max_concurrent": MAX_CONCURRENT,
         "modes": [{"key": k, "label": v} for k, v in MODE_LABELS.items()],
         "qualities": list(QUALITIES),
-        "audio_formats": [{"key": k, "label": v} for k, v in AUDIO_FORMAT_LABELS.items()],
+        "audio_formats": [
+            {"key": f.key, "label": f.label, "convert": f.codec is not None,
+             "lossless": f.lossless, "bitrate_ok": f.bitrate_ok}
+            for f in AUDIO_FORMATS.values()
+        ],
+        "audio_qualities": [{"key": k, "label": v} for k, v in AUDIO_QUALITY_LABELS.items()],
     }
 
 

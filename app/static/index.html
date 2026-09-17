@@ -41,15 +41,6 @@
         </select>
       </label>
 
-      <label class="field">
-        <span class="label">Audio format</span>
-        <select id="audio-format" name="audio_format">
-          <option value="native">Original (no re-encode)</option>
-          <option value="mp3">MP3 (VBR ~245 kbps)</option>
-          <option value="wav">WAV (uncompressed)</option>
-        </select>
-      </label>
-
       <label class="field grow">
         <span class="label">Output folder</span>
         <div class="path-row">
@@ -58,6 +49,23 @@
         </div>
       </label>
     </div>
+
+    <div class="row" id="audio-row">
+      <label class="field">
+        <span class="label">Audio format</span>
+        <select id="audio-format" name="audio_format">
+          <option value="native">Original (no re-encode)</option>
+        </select>
+      </label>
+
+      <label class="field">
+        <span class="label">Bitrate</span>
+        <select id="audio-quality" name="audio_quality">
+          <option value="best">Best</option>
+        </select>
+      </label>
+    </div>
+    <p class="hint" id="audio-hint"></p>
 
     <div class="actions">
       <button type="submit" id="submit" class="primary">Download</button>

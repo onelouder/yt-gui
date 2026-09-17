@@ -60,6 +60,18 @@ SCENARIOS = [
       [{"streams": ["video:*"]}, {"ext": "mp3", "streams": ["audio:mp3"]}], files=2),
     S("archive-audio", {"url": ARCHIVE, "mode": "audio"},
       [{"streams": ["audio:*"]}], files=1),
+
+    # -- sprint 1: MP3 bitrate ----------------------------------------------
+    *[S(f"mp3-{q}", {"url": YT, "mode": "audio", "audio_format": "mp3", "audio_quality": q},
+        [{"ext": "mp3", "streams": ["audio:mp3"], "bitrate": (int(q) * 0.98, int(q) * 1.02), "vbr": False}],
+        files=1)
+      for q in ("320", "192", "128")],
+    S("mp3-best-vbr", {"url": YT, "mode": "audio", "audio_format": "mp3", "audio_quality": "best"},
+      [{"ext": "mp3", "streams": ["audio:mp3"], "bitrate": (64, 320), "vbr": True}], files=1),
+    S("wav-ignores-bitrate", {"url": YT, "mode": "audio", "audio_format": "wav", "audio_quality": "128"},
+      [{"ext": "wav", "streams": ["audio:pcm_s16le"], "bitrate": (1000, 3000)}], files=1),
+    S("bad-bitrate-rejected", {"url": YT, "mode": "audio", "audio_format": "mp3", "audio_quality": "999"},
+      [], http=400),
 ]
 
 
@@ -125,6 +137,12 @@ def check_file(path: str, exp: dict) -> list[str]:
         lo, hi = exp["bitrate"]
         if kbps is None or not lo <= kbps <= hi:
             errs.append(f"bitrate {kbps} kbps not in [{lo}, {hi}]")
+    if "vbr" in exp:
+        head = p.read_bytes()[:65536]
+        vbr = b"Xing" in head
+        cbr = b"Info" in head
+        if (vbr, cbr) != (exp["vbr"], not exp["vbr"]):
+            errs.append(f"LAME header Xing={vbr} Info={cbr}, expected {'VBR' if exp['vbr'] else 'CBR'}")
     if "cover" in exp:
         has = any(is_cover(s) for s in streams)
         if has != exp["cover"]:
