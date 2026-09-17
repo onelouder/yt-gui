@@ -1,18 +1,22 @@
 # Sprint Plan: v2 Audio & Batch Features
 
-**Date:** 2026-09-17
+**Date:** 2026-09-17 · **Status: all sprints delivered** the same day.
 **Builds on:** `PRD-download-gui.md` (v1) and the MP3/WAV option added 2026-09-17
 **Scope:** six features, one sprint each, plus a Sprint 0 that sets up testing.
 
-| # | Feature | Size | Sprint |
-|---|---|---|---|
-| — | Test harness + baseline | S | 0 |
-| 1 | MP3 bitrate choice (V0 / 320 / 192 / 128) | S | 1 |
-| 2 | More formats: FLAC, M4A, Opus | S | 2 |
-| 3 | Keep the original alongside the converted file | S–M | 3 |
-| 4 | Embed thumbnail + tags | M | 4 |
-| 5 | Playlist downloads | L | 5 |
-| 6 | Keep jobs after a server restart | M | 6 |
+Each sprint is one commit, tagged, and passed its gate before the next began. The
+plan below is kept as written; **[What actually changed](#what-actually-changed)**
+records where reality differed.
+
+| # | Feature | Size | Sprint | Tag |
+|---|---|---|---|---|
+| — | Test harness + baseline | S | 0 | `v2-sprint-0` ✅ |
+| 1 | MP3 bitrate choice (V0 / 320 / 192 / 128) | S | 1 | `v2-sprint-1` ✅ |
+| 2 | More formats: FLAC, M4A, Opus | S | 2 | `v2-sprint-2` ✅ |
+| 3 | Keep the original alongside the converted file | S–M | 3 | `v2-sprint-3` ✅ |
+| 4 | Embed thumbnail + tags | M | 4 | `v2-sprint-4` ✅ |
+| 5 | Playlist downloads | L | 5 | `v2-sprint-5` ✅ |
+| 6 | Keep jobs after a server restart | M | 6 | `v2-sprint-6` ✅ |
 
 Sizes: S ≈ half a day, M ≈ 1 day, L ≈ 2–3 days.
 
@@ -56,18 +60,24 @@ A sprint is done only when **all** of these pass:
    port with a temp output folder, submit scenario jobs, wait, then check the
    output files with `ffprobe`. **All earlier sprints' scenarios run again**, so
    this doubles as a regression check.
-3. **Manual UI checklist** for the sprint (listed below), run in a browser.
+3. **UI checks** — planned as a manual browser checklist, built instead as
+   `node app/tests/ui_check.mjs`: it drives the real page in headless Chromium over
+   the DevTools protocol (no npm dependencies), and `--shot` saves a screenshot per
+   check. Each sprint's checklist became checks in that file.
 4. **README** updated (options table, API table, known limits).
 5. **Commit**, tagged `v2-sprint-N`, so any sprint can be rolled back on its own.
 
 Test media: YouTube `jNQXAC9IVRw` ("Me at the zoo": 19 s, stable, public). Also one
 archive.org item, which keeps PRD criterion 7 (two extractors). Sprint 5 adds a
 small public playlist, chosen and recorded in `app/tests/fixtures.json` at the
-start of that sprint.
+start of that sprint — `PL6IaIsEjSbf96XFRuNccS_RuEXwNdsoEu` ("JODA15", 4 items), plus
+archive.org `testmp3testfile` (12 s MP3) as the second extractor.
+
+Final tally: 53 unit tests, 35 live scenarios, 14 UI checks.
 
 ---
 
-## Sprint 0: Test harness + baseline
+## ✅ Sprint 0: Test harness + baseline
 
 **Goal:** make "validate after each phase" a single command.
 
@@ -98,7 +108,7 @@ start of that sprint.
 
 ---
 
-## Sprint 1: MP3 bitrate choice
+## ✅ Sprint 1: MP3 bitrate choice
 
 **Goal:** the user picks MP3 quality instead of always getting V0.
 
@@ -128,7 +138,7 @@ start of that sprint.
 
 ---
 
-## Sprint 2: FLAC, M4A, Opus
+## ✅ Sprint 2: FLAC, M4A, Opus
 
 **Goal:** more target formats without if-chains everywhere.
 
@@ -164,7 +174,7 @@ start of that sprint.
 
 ---
 
-## Sprint 3: Keep original
+## ✅ Sprint 3: Keep original
 
 **Goal:** optionally keep the untouched source stream next to the converted file.
 
@@ -197,7 +207,7 @@ task shows both paths, labelled. The notice appears as a muted line, not an erro
 
 ---
 
-## Sprint 4: Embed thumbnail + tags
+## ✅ Sprint 4: Embed thumbnail + tags
 
 **Goal:** converted audio shows artwork, title and artist in music players.
 
@@ -238,7 +248,7 @@ available.
 
 ---
 
-## Sprint 5: Playlists
+## ✅ Sprint 5: Playlists
 
 **Goal:** a playlist URL downloads every item, for example a whole album to MP3.
 
@@ -293,7 +303,7 @@ default, with failed items always visible, so a 200-item card stays usable.
 
 ---
 
-## Sprint 6: Keep jobs after restart
+## ✅ Sprint 6: Keep jobs after restart
 
 **Goal:** a restart no longer wipes the job list, and interrupted jobs can be retried.
 
@@ -331,6 +341,61 @@ a "file missing" marker.
 - Smoke: delete a downloaded file → restart → the task shows `exists:false`.
 - Unit: the 200-job cap. Only terminal jobs are cleared.
 - Manual: Retry/Clear buttons work, and a page refresh after restart shows history.
+
+---
+
+## What actually changed
+
+Findings from building it, in the order they surfaced. The code and `app/README.md`
+describe the shipped behavior; this section says where it departs from the plan above.
+
+**Sprint 0 — a pre-existing bug.** The first live run failed on archive.org: **Audio
+only** with Original format used `bestaudio`, which matches nothing when an extractor
+leaves codecs unset. Fixed with a fallback selector that accepts a single file whose
+extension looks like audio. This bug predates v2.
+
+**Sprint 1/2 — the format spec table arrived one sprint early.** The bitrate rules
+needed it, so `AudioFormat` landed in Sprint 1 rather than being written twice.
+
+**Sprint 2 — "best" per encoder, and stream copies.** yt-dlp maps VBR numbers only for
+LAME/vorbis/AAC, so Opus "best" means 160 kbps and M4A "best" 256 kbps. When the source
+already uses the target codec (YouTube → Opus, archive.org → MP3), yt-dlp copies the
+stream and the bitrate is ignored — the app now prints the source codec
+(`-O video:%(acodec)s`) and says so on the task.
+
+**Sprint 3 — no collision guard needed.** The plan assumed re-encoding to the same
+extension would overwrite the source. It doesn't: yt-dlp either skips the conversion
+(reporting "already in target format") or renames the source `<name>.orig.<ext>`. So
+there is no prediction step in `check_formats`; the task simply reports the files it
+found, and notes when there is no separate original to keep.
+
+**Sprint 4 — two real defects, both caught by the tests.**
+- ffmpeg 9 writes `.m4a` through its `ipod` muxer, which rejects JPEG covers, so
+  yt-dlp's ffmpeg fallback for M4A art fails outright. M4A art now needs mutagen or
+  AtomicParsley, like Opus and FLAC — the plan had assumed ffmpeg would cover it.
+- `-k` keeps *every* intermediate, including the pre-conversion thumbnail, leaving a
+  stray `.webp`. With Keep original on, `--convert-thumbnails` is skipped so yt-dlp
+  converts internally and cleans up (the cover is PNG instead of JPEG).
+
+Also: the fixture video has real YouTube chapters, which `--embed-metadata` embeds —
+in MP4 that appears as an extra text track, so it is expected, not a fault.
+
+**Sprint 5 — a placeholder bug the UI check found.** Playlist jobs were created with a
+single placeholder task, so a card briefly showed a fake item before the probe replaced
+the plan. Playlist jobs now start with no tasks. The card's auto-expand also overrode a
+deliberate collapse; the user's choice now wins.
+
+**Sprint 6 — SIGTERM was ignored.** Only Ctrl+C ran the shutdown path, so a normal stop
+(`systemctl`, `kill`, a test harness) lost up to two seconds of history and left
+finished jobs recorded as running. SIGTERM now takes the same exit path.
+
+**Cover art with mutagen installed** was verified after the fact. `python-mutagen`
+1.48.1 was installed later the same day, the server's detection picked it up, and the
+13 conversion/tagging scenarios were re-run: all passed, this time *requiring* art in
+Opus, FLAC and M4A. Checked independently with ffprobe (an `mjpeg` stream with
+`attached_pic`) and with mutagen itself. So both paths are exercised: the earlier runs
+covered the tags-only fallback, these cover the full path. See the Sprint 4 section of
+`app/README.md` for what each format needs.
 
 ---
 
