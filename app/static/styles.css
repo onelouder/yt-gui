@@ -154,6 +154,7 @@ button.small { padding: 5px 10px; font-size: 13px; }
 }
 
 .jobs { margin-top: 28px; }
+.jobs h2 button { margin-left: 8px; vertical-align: middle; }
 .jobs h2 { font-size: 15px; margin: 0 0 12px; }
 .muted { color: var(--muted); font-weight: 400; }
 .empty { color: var(--muted); font-size: 14px; }
@@ -180,6 +181,8 @@ button.small { padding: 5px 10px; font-size: 13px; }
 .state.failed, .state.cancelled { color: var(--bad); }
 .state.queued { color: var(--muted); }
 .state.downloading, .state.merging, .state.probing-formats { color: var(--accent); }
+.state.interrupted, .state.partial { color: #d9a441; }
+.file.gone { color: var(--bad); text-decoration: line-through; }
 
 .task { margin-top: 12px; }
 .task-head { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; }

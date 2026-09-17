@@ -7,6 +7,7 @@ only), choose a folder, and download. Everything runs on your own machine.
 - **Standard library only:** one Python file for the server and a static page. Nothing to `pip install`, no build step.
 - **Four download modes** plus a quality cap (best / 1080p / 720p / 480p).
 - **Audio conversion** to **MP3**, **M4A**, **Opus** (choice of bitrate), **FLAC** or **WAV** using ffmpeg, or keep the original stream.
+- **Job history** that survives a restart, with retry for interrupted downloads.
 - **Playlists** (opt-in): every item downloaded separately, numbered, with per-item failures.
 - **Cover art and tags** (title, artist, chapters) embedded in the audio file.
 - **Live progress** for each file (percent, speed, ETA) over Server-Sent Events, and a cancel button.
@@ -37,7 +38,8 @@ Open <http://localhost:8723>.
 python3 app/server.py --port 9000 \
                       --outdir ~/Music \      # default download folder
                       --root ~ \              # output paths must be inside this
-                      --max-concurrent 3
+                      --max-concurrent 3 \
+                      --state-file none      # don't save the job list
 ```
 
 ## Modes

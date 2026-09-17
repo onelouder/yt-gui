@@ -168,10 +168,11 @@ function renderTask(task) {
   track.append(fill);
   wrap.append(track);
 
+  const miss = (gone) => (gone ? '  ·  file missing' : '');
   if (task.files?.length > 1) {
-    task.files.forEach((f) => wrap.append(el('div', 'file', `${f.role}: ${f.path}`)));
+    task.files.forEach((f) => wrap.append(el('div', `file${f.missing ? ' gone' : ''}`, `${f.role}: ${f.path}${miss(f.missing)}`)));
   } else if (task.filepath) {
-    wrap.append(el('div', 'file', task.filepath));
+    wrap.append(el('div', `file${task.missing ? ' gone' : ''}`, `${task.filepath}${miss(task.missing)}`));
   }
   (task.notes || []).forEach((n) => wrap.append(el('p', 'note', n)));
   if (task.error) wrap.append(el('p', 'error', task.error));
@@ -239,6 +240,16 @@ function renderJob(job) {
 
   const foot = el('div', 'job-foot');
   const active = ['queued', 'probing formats', 'downloading'].includes(job.state);
+  if (!active && ['failed', 'partial', 'cancelled', 'interrupted'].includes(job.state)) {
+    const retry = el('button', 'small', 'Retry');
+    retry.type = 'button';
+    retry.addEventListener('click', async () => {
+      retry.disabled = true;
+      await fetch(`/api/jobs/${job.id}/retry`, { method: 'POST' });
+      poll();
+    });
+    foot.append(retry);
+  }
   if (active) {
     const btn = el('button', 'small', 'Cancel');
     btn.type = 'button';
@@ -266,6 +277,17 @@ function renderJob(job) {
     $('url').focus();
   });
   foot.append(again);
+  if (!active) {
+    const rm = el('button', 'small ghost', 'Remove');
+    rm.type = 'button';
+    rm.title = 'Forget this job. Downloaded files are kept.';
+    rm.addEventListener('click', async () => {
+      rm.disabled = true;
+      await fetch(`/api/jobs/${job.id}`, { method: 'DELETE' });
+      poll();
+    });
+    foot.append(rm);
+  }
   card.append(foot);
 
   return card;
@@ -274,6 +296,7 @@ function renderJob(job) {
 function render(state) {
   const jobs = state.jobs || [];
   $('empty').hidden = jobs.length > 0;
+  $('clear-finished').hidden = !jobs.some((j) => !['queued', 'probing formats', 'downloading'].includes(j.state));
   $('job-count').textContent = jobs.length ? `(${jobs.length})` : '';
   const frag = document.createDocumentFragment();
   jobs.forEach((j) => frag.append(renderJob(j)));
@@ -302,6 +325,11 @@ async function poll() {
 // --------------------------------------------------------------------- form
 form.addEventListener('change', (e) => {
   if (['mode', 'audio_format', 'embed', 'playlist'].includes(e.target.name)) syncMode();
+});
+
+$('clear-finished').addEventListener('click', async () => {
+  await fetch('/api/jobs/clear', { method: 'POST' });
+  poll();
 });
 
 $('reset-path').addEventListener('click', () => {

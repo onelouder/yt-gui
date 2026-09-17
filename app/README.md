@@ -115,6 +115,20 @@ Off by default: a `watch?v=…&list=…` URL still downloads the single video. T
 - A playlist job holds one concurrency slot and runs its items one after another;
   cancelling stops the current item and skips the rest.
 
+## Job history
+
+The job list is saved to `${XDG_STATE_HOME:-~/.local/state}/yt-gui/jobs.json`
+(`--state-file PATH`, or `--state-file none` to keep it in memory only). Writes are
+coalesced to at most one every 2 s, written to a temp file and renamed into place, and
+flushed on shutdown — including SIGTERM, which takes the same exit path as Ctrl+C.
+
+On startup the newest 200 jobs come back. Jobs that were still running are marked
+`interrupted` (nothing is resumed automatically) and files that have since been deleted
+are flagged. **Retry** re-submits a job with the same settings — yt-dlp continues any
+`.part` file and the playlist archive skips items already finished. **Remove** and
+**Clear finished** forget jobs; downloaded files are never touched. An unreadable state
+file is moved aside as `jobs.bad-<timestamp>` and the server starts with an empty list.
+
 ## API
 
 | Method | Path | Notes |
@@ -124,6 +138,9 @@ Off by default: a `watch?v=…&list=…` URL still downloads the single video. T
 | `GET` | `/api/jobs` | `{version, jobs: [...]}` newest first |
 | `GET` | `/api/jobs/{id}` | one job |
 | `POST` | `/api/jobs/{id}/cancel` | SIGTERMs the process group |
+| `POST` | `/api/jobs/{id}/retry` | re-submits the same settings as a new job (`409` while it runs) |
+| `DELETE` | `/api/jobs/{id}` | forget one finished job (`409` while it runs) |
+| `POST` | `/api/jobs/clear` | forget every finished job |
 | `POST` | `/api/validate-path` | `{outdir}` → `{ok, path}` / `{ok: false, error}` |
 | `GET` | `/api/events` | SSE, ~1 Hz, full state snapshot when it changes |
 
@@ -167,7 +184,7 @@ don't touch a running instance. Test URLs are in `app/tests/fixtures.json`.
 
 - One URL per job (a playlist counts as one job).
 - No cookies/login, subtitles, thumbnails, SponsorBlock, trimming or remuxing.
-- Job state lives in memory: a server restart clears the list, files stay on disk.
+- A restart cannot resume a download; interrupted jobs are listed for one-click Retry.
 - In **Merged** mode the percentage steps back once when yt-dlp moves from the
   video stream to the audio stream — the second stream's size isn't known until it
   starts. Byte counts stay correct.

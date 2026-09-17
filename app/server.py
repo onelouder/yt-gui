@@ -60,6 +60,8 @@ PP_STATES = {
     "EmbedThumbnail": "embedding art",
 }
 ACTIVE_TASK_STATES = ("queued", "downloading", *dict.fromkeys(PP_STATES.values()))
+ACTIVE_JOB_STATES = ("queued", "probing formats", "downloading")
+RETRYABLE = ("failed", "partial", "cancelled", "interrupted")
 QUALITIES = {"best": None, "1080": 1080, "720": 720, "480": 480}
 
 @dataclass(frozen=True)
@@ -191,6 +193,7 @@ class Task:
         self.files: list[dict] = []
         self.error = None
         self.notes: list[str] = []
+        self.missing = False  # set when a restored file is no longer on disk
 
     @property
     def percent(self):
@@ -212,6 +215,7 @@ class Task:
             "eta": self.eta,
             "filepath": self.filepath,
             "files": self.files,
+            "missing": self.missing,
             "error": self.error,
             "notes": self.notes,
         }
@@ -303,6 +307,7 @@ def _killpg(proc):
 JOBS: dict[str, Job] = {}
 JOBS_ORDER: list[str] = []
 JOBS_LOCK = threading.Lock()
+MAX_HISTORY = 200
 SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT)
 VERSION_LOCK = threading.Lock()
 STATE_VERSION = [0]
@@ -311,12 +316,112 @@ STATE_VERSION = [0]
 def bump():
     with VERSION_LOCK:
         STATE_VERSION[0] += 1
+    DIRTY.set()
 
 
 def snapshot():
     with JOBS_LOCK:
         jobs = [JOBS[j].to_dict() for j in reversed(JOBS_ORDER)]
     return {"version": STATE_VERSION[0], "jobs": jobs}
+
+
+# --------------------------------------------------------------------------- #
+# Persistence: the job list survives a restart; running jobs do not
+# --------------------------------------------------------------------------- #
+
+SCHEMA = 1
+STATE_FILE: Path | None = None
+DIRTY = threading.Event()
+SAVE_DELAY = 2.0
+
+
+def default_state_file() -> Path:
+    base = os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state")
+    return Path(base) / "yt-gui" / "jobs.json"
+
+
+def save_state() -> None:
+    if not STATE_FILE:
+        return
+    with JOBS_LOCK:
+        jobs = [JOBS[i].to_dict() for i in JOBS_ORDER[-MAX_HISTORY:]]
+    payload = {"schema": SCHEMA, "saved": time.time(), "jobs": jobs}
+    tmp = STATE_FILE.with_suffix(".tmp")
+    try:
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(payload))
+        os.replace(tmp, STATE_FILE)
+    except OSError as exc:
+        print(f"warning: could not save job history to {STATE_FILE}: {exc}", flush=True)
+
+
+def state_writer() -> None:
+    """Coalesce updates: save at most every SAVE_DELAY seconds."""
+    while True:
+        DIRTY.wait()
+        time.sleep(SAVE_DELAY)
+        DIRTY.clear()
+        save_state()
+
+
+def job_from_dict(d: dict) -> Job:
+    """Rebuild a finished job record. Interrupted work is marked, never resumed."""
+    job = Job(d["url"], d["mode"], d.get("quality", "best"), d.get("audio_format", "native"),
+              d.get("audio_quality", "best"), Path(d["outdir"]), d.get("keep_original", False),
+              d.get("embed", False), d.get("playlist", False), d.get("items", ""),
+              d.get("skip_existing", False))
+    job.id = d.get("id") or job.id
+    job.title = d.get("title")
+    job.created = d.get("created") or time.time()
+    job.playlist_title = d.get("playlist_title")
+    job.playlist_count = d.get("playlist_count")
+    interrupted = d.get("state") in ACTIVE_JOB_STATES
+    job.state = "interrupted" if interrupted else d.get("state", "done")
+    job.error = d.get("error") or ("The server stopped while this job was running." if interrupted else None)
+
+    for td in d.get("tasks") or []:
+        t = Task(td.get("key", "task"), td.get("label", "Task"))
+        t.state = "interrupted" if td.get("state") in ACTIVE_TASK_STATES else td.get("state", "done")
+        t.downloaded = td.get("downloaded") or 0
+        t.total = td.get("total")
+        t.filepath = td.get("filepath")
+        t.files = td.get("files") or []
+        t.notes = list(td.get("notes") or [])
+        t.error = td.get("error")
+        for f in t.files:
+            f["missing"] = not Path(f["path"]).exists()
+        t.missing = bool(t.filepath) and not Path(t.filepath).exists()
+        job.tasks.append(t)
+    return job
+
+
+def load_state() -> None:
+    if not STATE_FILE or not STATE_FILE.exists():
+        return
+    try:
+        data = json.loads(STATE_FILE.read_text())
+        jobs = data["jobs"] if data.get("schema") == SCHEMA else []
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        bad = STATE_FILE.with_suffix(f".bad-{int(time.time())}")
+        try:
+            os.replace(STATE_FILE, bad)
+        except OSError:
+            bad = None
+        print(f"warning: unreadable job history ({exc}); starting empty"
+              + (f", old file kept at {bad}" if bad else ""), flush=True)
+        return
+
+    restored = 0
+    for d in jobs[-MAX_HISTORY:]:
+        try:
+            job = job_from_dict(d)
+        except (KeyError, TypeError, ValueError):
+            continue  # one broken record must not cost the whole history
+        JOBS[job.id] = job
+        JOBS_ORDER.append(job.id)
+        restored += 1
+    if restored:
+        print(f"restored {restored} job(s) from {STATE_FILE}", flush=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -832,6 +937,24 @@ def run_job(job: Job) -> None:
             bump()
 
 
+def trim_history() -> None:
+    """Drop the oldest finished jobs once the list is over MAX_HISTORY. Caller holds the lock."""
+    for jid in list(JOBS_ORDER):
+        if len(JOBS_ORDER) <= MAX_HISTORY:
+            break
+        if JOBS[jid].state not in ACTIVE_JOB_STATES:
+            JOBS_ORDER.remove(jid)
+            JOBS.pop(jid, None)
+
+
+def retry_data(job: Job) -> dict:
+    """The request body that would recreate this job."""
+    return {"url": job.url, "mode": job.mode, "quality": job.quality,
+            "audio_format": job.audio_format, "audio_quality": job.audio_quality,
+            "keep_original": job.keep_original, "embed": job.embed, "playlist": job.playlist,
+            "items": job.items, "skip_existing": job.skip_existing, "outdir": job.outdir}
+
+
 def set_plan(job: Job, plan: list[Step]) -> None:
     job.plan = plan
     job.tasks = [step.task for step in plan]
@@ -904,6 +1027,7 @@ def submit_job(job: Job) -> Job:
     with JOBS_LOCK:
         JOBS[job.id] = job
         JOBS_ORDER.append(job.id)
+        trim_history()
     bump()
     threading.Thread(target=run_job, args=(job,), daemon=True).start()
     return job
@@ -981,6 +1105,27 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.send_json({"error": "Not found."}, 404)
 
+    def do_DELETE(self):  # noqa: N802
+        if not self.local_host_ok():
+            self.send_json({"error": "Forbidden host header."}, 403)
+            return
+        path = urlparse(self.path).path
+        if not path.startswith("/api/jobs/"):
+            self.send_json({"error": "Not found."}, 404)
+            return
+        job = JOBS.get(path.rsplit("/", 1)[-1])
+        if not job:
+            self.send_json({"error": "No such job."}, 404)
+        elif job.state in ACTIVE_JOB_STATES:
+            self.send_json({"error": "Cancel the job before removing it."}, 409)
+        else:
+            with JOBS_LOCK:
+                JOBS.pop(job.id, None)
+                if job.id in JOBS_ORDER:
+                    JOBS_ORDER.remove(job.id)
+            bump()
+            self.send_json({"removed": 1})
+
     def do_POST(self):  # noqa: N802
         if not self.local_host_ok():
             self.send_json({"error": "Forbidden host header."}, 403)
@@ -1003,6 +1148,20 @@ class Handler(BaseHTTPRequestHandler):
             job.cancel()
             bump()
             self.send_json(job.to_dict())
+        elif path.startswith("/api/jobs/") and path.endswith("/retry"):
+            job = JOBS.get(path.split("/")[3])
+            if not job:
+                self.send_json({"error": "No such job."}, 404)
+            elif job.state in ACTIVE_JOB_STATES:
+                self.send_json({"error": "That job is still running."}, 409)
+            else:
+                try:
+                    self.send_json(submit_job(new_job(retry_data(job))).to_dict(), 201)
+                except (ValueError, PathError) as exc:
+                    self.send_json({"error": str(exc)}, 400)
+        elif path == "/api/jobs/clear":
+            removed = clear_finished()
+            self.send_json({"removed": removed})
         elif path == "/api/validate-path":
             data = self.read_json()
             try:
@@ -1050,6 +1209,17 @@ class Handler(BaseHTTPRequestHandler):
             return
 
 
+def clear_finished() -> int:
+    """Forget every job that is not running. Files on disk are untouched."""
+    with JOBS_LOCK:
+        gone = [i for i in JOBS_ORDER if JOBS[i].state not in ACTIVE_JOB_STATES]
+        for jid in gone:
+            JOBS_ORDER.remove(jid)
+            JOBS.pop(jid, None)
+    bump()
+    return len(gone)
+
+
 def config_payload():
     return {
         "ffmpeg": bool(FFMPEG),
@@ -1062,6 +1232,7 @@ def config_payload():
         "allowed_root": str(ALLOWED_ROOT),
         "max_concurrent": MAX_CONCURRENT,
         "max_playlist_items": MAX_PLAYLIST_ITEMS,
+        "state_file": str(STATE_FILE) if STATE_FILE else None,
         "modes": [{"key": k, "label": v} for k, v in MODE_LABELS.items()],
         "qualities": list(QUALITIES),
         "audio_formats": [
@@ -1109,7 +1280,7 @@ def ytdlp_version():
 
 
 def main():
-    global DEFAULT_OUTDIR, ALLOWED_ROOT, MAX_CONCURRENT, SLOTS, MAX_PLAYLIST_ITEMS
+    global DEFAULT_OUTDIR, ALLOWED_ROOT, MAX_CONCURRENT, SLOTS, MAX_PLAYLIST_ITEMS, STATE_FILE
 
     ap = argparse.ArgumentParser(description="Local web GUI for yt-dlp")
     ap.add_argument("--port", type=int, default=8723)
@@ -1118,6 +1289,8 @@ def main():
     ap.add_argument("--root", default=str(ALLOWED_ROOT), help="allowed root for output paths")
     ap.add_argument("--max-concurrent", type=int, default=MAX_CONCURRENT)
     ap.add_argument("--max-playlist-items", type=int, default=MAX_PLAYLIST_ITEMS)
+    ap.add_argument("--state-file", default=str(default_state_file()),
+                    help="where the job list is saved ('none' to keep it in memory only)")
     args = ap.parse_args()
 
     if not YTDLP:
@@ -1129,6 +1302,11 @@ def main():
     MAX_PLAYLIST_ITEMS = max(1, args.max_playlist_items)
     SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT)
 
+    if args.state_file.lower() not in ("none", ""):
+        STATE_FILE = Path(os.path.expanduser(args.state_file)).resolve()
+        load_state()
+        threading.Thread(target=state_writer, daemon=True).start()
+
     try:
         DEFAULT_OUTDIR.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -1137,6 +1315,13 @@ def main():
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.daemon_threads = True
 
+    def stop(signum, frame):
+        # a service manager (or a test) stops us with SIGTERM: take the same exit
+        # path as Ctrl+C, so running jobs are marked and the history is saved
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop)
+
     banner = [
         f"yt-dlp GUI  \u2192  http://localhost:{args.port}",
         f"  yt-dlp    : {YTDLP} ({ytdlp_version()})",
@@ -1144,6 +1329,7 @@ def main():
         f"  mutagen   : {'yes' if has_mutagen() else 'no \u2014 no cover art for Opus/FLAC'}",
         f"  downloads : {DEFAULT_OUTDIR}",
         f"  allowed   : {ALLOWED_ROOT}",
+        f"  history   : {STATE_FILE or 'in memory only'}",
         "  note      : no auth \u2014 any user on this machine can reach this port.",
     ]
     print("\n".join(banner), flush=True)
@@ -1152,8 +1338,11 @@ def main():
     except KeyboardInterrupt:
         print("\nshutting down")
         for job in list(JOBS.values()):
-            if job.state in ("queued", "probing formats", "downloading"):
+            if job.state in ACTIVE_JOB_STATES:
                 job.cancel()
+                job.state = "interrupted"
+                job.error = "The server was stopped while this job was running."
+        save_state()
         server.shutdown()
 
 

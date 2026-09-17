@@ -137,6 +137,25 @@ const CHECKS = [
     await t.until(() => document.querySelector('.job[data-id="' + job.id + '"] .state.cancelled'), 30000);
     t.ok(!document.querySelector('.job[data-id="' + job.id + '"] details.items').open, 'stays collapsed after re-render');
   `],
+  ['history: restored jobs show interrupted state, missing files, retry/remove', `
+    const card = await t.until(() => document.querySelector('.job[data-id=seedinterrupt]'));
+    t.ok(card.querySelector('.state.interrupted'), 'interrupted state chip');
+    t.ok(card.textContent.includes('stopped while this job was running'), 'explains itself');
+    const labels = [...card.querySelectorAll('button')].map((b) => b.textContent);
+    t.ok(labels.includes('Retry') && labels.includes('Remove'), 'buttons: ' + labels.join(','));
+    const gone = document.querySelector('.job[data-id=seedmissing] .file.gone');
+    t.ok(gone && gone.textContent.includes('file missing'), 'missing file marked');
+    t.ok(!t.$('clear-finished').hidden, 'clear-finished shown');
+  `],
+  ['history: remove drops one job, clear finished drops the rest', `
+    await t.until(() => document.querySelector('.job[data-id=seedmissing]'));
+    [...document.querySelectorAll('.job[data-id=seedmissing] button')].find((b) => b.textContent === 'Remove').click();
+    await t.until(() => !document.querySelector('.job[data-id=seedmissing]'), 15000);
+    t.$('clear-finished').click();
+    await t.until(() => !document.querySelector('.job[data-id=seedinterrupt]'), 15000);
+    t.ok(t.$('clear-finished').hidden, 'button hides when nothing is left');
+    t.ok(!t.$('empty').hidden, 'empty message returns');
+  `],
 ];
 
 // ---------------------------------------------------------------------------
@@ -176,7 +195,22 @@ async function main() {
   const chosen = CHECKS.filter(([n]) => !filters.length || filters.some((f) => n.includes(f)));
   const tmp = mkdtempSync(join(tmpdir(), 'yt-gui-ui-'));
   const port = await freePort();
+  // seed a saved history so the restored-job rendering can be checked without a restart
+  const stateFile = join(tmp, 'state.json');
+  writeFileSync(stateFile, JSON.stringify({
+    schema: 1,
+    jobs: [
+      { id: 'seedinterrupt', url: 'https://example.com/a', mode: 'audio', quality: 'best',
+        audio_format: 'mp3', outdir: tmp, title: 'Interrupted song', state: 'downloading', created: 1,
+        tasks: [{ key: 'audio', label: 'Audio → MP3 best', state: 'downloading', downloaded: 10, total: 100 }] },
+      { id: 'seedmissing', url: 'https://example.com/b', mode: 'audio', quality: 'best',
+        audio_format: 'mp3', outdir: tmp, title: 'Gone song', state: 'done', created: 2,
+        tasks: [{ key: 'audio', label: 'Audio → MP3 best', state: 'done',
+                  filepath: join(tmp, 'not-here.mp3') }] },
+    ],
+  }));
   const server = spawn('python3', [SERVER, '--port', port, '--root', tmp, '--outdir', join(tmp, 'dl'),
+    '--state-file', stateFile,
     ...(process.env.UI_SERVER_ARGS ? process.env.UI_SERVER_ARGS.split(' ') : [])], { stdio: 'ignore' });
   const profile = join(tmp, 'profile');
   const chrome = spawn('chromium', ['--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`,

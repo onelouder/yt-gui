@@ -204,15 +204,176 @@ def cancel_mid_playlist(port, scdir):
     return errs
 
 
+def restart_keeps_history(port, scdir):
+    """A finished job, a restart, then the same job still listed - and retryable."""
+    errs = []
+    state = scdir / "state.json"
+    p2 = free_port()
+    log = open(scdir / "server.log", "w")
+    srv = start_server(p2, scdir, log, state)
+    try:
+        for _ in range(60):
+            try:
+                api(p2, "GET", "/api/config")
+                break
+            except OSError:
+                time.sleep(0.2)
+        _, job = api(p2, "POST", "/api/jobs", {"url": YT, "mode": "audio", "audio_format": "mp3",
+                                               "outdir": str(scdir / "dl")})
+        done = wait_job(p2, job["id"], terminal)
+        if done["state"] != "done":
+            return [f"first run {done['state']}: {done.get('error')}"]
+        path = done["tasks"][0]["filepath"]
+    finally:
+        srv.terminate()
+        srv.wait(timeout=10)
+
+    srv = start_server(p2, scdir, log, state)
+    try:
+        for _ in range(60):
+            try:
+                _, snap = api(p2, "GET", "/api/jobs")
+                break
+            except OSError:
+                time.sleep(0.2)
+        jobs = snap["jobs"]
+        if len(jobs) != 1 or jobs[0]["id"] != job["id"]:
+            return [f"history not restored: {[j.get('id') for j in jobs]}"]
+        back = jobs[0]
+        if back["state"] != "done":
+            errs.append(f"restored state {back['state']} != done")
+        if back["tasks"][0]["filepath"] != path:
+            errs.append("restored task lost its filepath")
+        if back["tasks"][0]["missing"]:
+            errs.append("existing file reported as missing")
+
+        Path(path).unlink()
+        srv.terminate(); srv.wait(timeout=10)
+        srv = start_server(p2, scdir, log, state)
+        for _ in range(60):
+            try:
+                _, snap = api(p2, "GET", "/api/jobs")
+                break
+            except OSError:
+                time.sleep(0.2)
+        if not snap["jobs"][0]["tasks"][0]["missing"]:
+            errs.append("deleted file not flagged missing after restart")
+
+        status, retried = api(p2, "POST", f"/api/jobs/{job['id']}/retry", {})
+        if status != 201:
+            errs.append(f"retry HTTP {status}: {retried}")
+        else:
+            again = wait_job(p2, retried["id"], terminal)
+            if again["state"] != "done":
+                errs.append(f"retried job {again['state']}: {again.get('error')}")
+            elif not Path(again["tasks"][0]["filepath"]).exists():
+                errs.append("retried job produced no file")
+
+        _, cleared = api(p2, "POST", "/api/jobs/clear", {})
+        _, snap = api(p2, "GET", "/api/jobs")
+        if snap["jobs"]:
+            errs.append(f"clear left {len(snap['jobs'])} jobs")
+    finally:
+        srv.terminate()
+        srv.wait(timeout=10)
+        log.close()
+    return errs
+
+
+def kill_leaves_interrupted(port, scdir):
+    """SIGKILL mid-download: the job comes back as interrupted, then retries fine."""
+    errs = []
+    state = scdir / "state.json"
+    p2 = free_port()
+    log = open(scdir / "server.log", "w")
+    srv = start_server(p2, scdir, log, state)
+    try:
+        for _ in range(60):
+            try:
+                api(p2, "GET", "/api/config")
+                break
+            except OSError:
+                time.sleep(0.2)
+        _, job = api(p2, "POST", "/api/jobs", {"url": PLAYLIST, "mode": "audio", "playlist": True,
+                                               "outdir": str(scdir / "dl")})
+        wait_job(p2, job["id"], lambda j: any(t["state"] == "downloading" for t in j["tasks"]), timeout=180)
+        time.sleep(2)  # let the state writer flush
+    finally:
+        srv.kill()
+        srv.wait(timeout=10)
+    subprocess.run(["pkill", "-f", f"-I .* {PLAYLIST}"], capture_output=True)
+
+    srv = start_server(p2, scdir, log, state)
+    try:
+        for _ in range(60):
+            try:
+                _, snap = api(p2, "GET", "/api/jobs")
+                break
+            except OSError:
+                time.sleep(0.2)
+        if not snap["jobs"]:
+            return ["nothing restored after the kill"]
+        back = snap["jobs"][0]
+        if back["state"] != "interrupted":
+            errs.append(f"state {back['state']} != interrupted")
+        if not any(t["state"] == "interrupted" for t in back["tasks"]):
+            errs.append(f"no interrupted task: {[t['state'] for t in back['tasks']]}")
+        if "stopped" not in (back.get("error") or ""):
+            errs.append(f"error text: {back.get('error')!r}")
+    finally:
+        srv.terminate()
+        srv.wait(timeout=10)
+        log.close()
+    return errs
+
+
+def corrupt_state_still_starts(port, scdir):
+    state = scdir / "state.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text("{ this is not json")
+    p2 = free_port()
+    log = open(scdir / "server.log", "w")
+    srv = start_server(p2, scdir, log, state)
+    errs = []
+    try:
+        for _ in range(60):
+            try:
+                _, snap = api(p2, "GET", "/api/jobs")
+                break
+            except OSError:
+                time.sleep(0.2)
+        else:
+            return ["server did not start with a corrupt state file"]
+        if snap["jobs"]:
+            errs.append("expected an empty job list")
+        if not list(scdir.glob("state.bad-*")):
+            errs.append(f"no .bad-* backup: {[p.name for p in scdir.iterdir()]}")
+    finally:
+        srv.terminate()
+        srv.wait(timeout=10)
+        log.close()
+    return errs
+
+
 SCENARIOS += [
     {"name": "playlist-rerun-skips", "custom": rerun_skips_existing},
     {"name": "playlist-cancel", "custom": cancel_mid_playlist},
+    {"name": "restart-keeps-history", "custom": restart_keeps_history},
+    {"name": "kill-leaves-interrupted", "custom": kill_leaves_interrupted},
+    {"name": "corrupt-state-still-starts", "custom": corrupt_state_still_starts},
 ]
 
 
 # --------------------------------------------------------------------------- #
 # Harness
 # --------------------------------------------------------------------------- #
+
+def start_server(port, root: Path, log, state_file: Path = None):
+    argv = [sys.executable, str(SERVER), "--port", str(port), "--root", str(root),
+            "--outdir", str(root / "default"),
+            "--state-file", str(state_file) if state_file else "none"]
+    return subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT)
+
 
 def free_port() -> int:
     with socket.socket() as s:
@@ -352,11 +513,7 @@ def main():
     tmp = Path(tempfile.mkdtemp(prefix="yt-gui-smoke-"))
     port = free_port()
     log = open(tmp / "server.log", "w")
-    proc = subprocess.Popen(
-        [sys.executable, str(SERVER), "--port", str(port), "--root", str(tmp),
-         "--outdir", str(tmp / "default")],
-        stdout=log, stderr=subprocess.STDOUT,
-    )
+    proc = start_server(port, tmp, log)
     results = []
     try:
         for _ in range(50):

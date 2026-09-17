@@ -376,6 +376,94 @@ class PlaylistTests(Base):
             server.run_task = real
 
 
+class PersistenceTests(Base):
+    def setUp(self):
+        super().setUp()
+        server.STATE_FILE = self.root / "state" / "jobs.json"
+        self._jobs, self._order = dict(server.JOBS), list(server.JOBS_ORDER)
+        server.JOBS.clear()
+        server.JOBS_ORDER.clear()
+
+    def tearDown(self):
+        server.JOBS.clear(), server.JOBS_ORDER.clear()
+        server.JOBS.update(self._jobs), server.JOBS_ORDER.extend(self._order)
+        server.STATE_FILE = None
+        super().tearDown()
+
+    def add(self, state="done", **kw):
+        job = self.job(mode="audio", **kw)
+        job.state = state
+        server.JOBS[job.id] = job
+        server.JOBS_ORDER.append(job.id)
+        return job
+
+    def reload(self):
+        server.save_state()
+        server.JOBS.clear()
+        server.JOBS_ORDER.clear()
+        server.load_state()
+        return [server.JOBS[i] for i in server.JOBS_ORDER]
+
+    def test_round_trip(self):
+        job = self.add(audio_format="mp3", audio_quality="192", keep_original=True)
+        job.title = "Song"
+        job.tasks[0].state = "done"
+        job.tasks[0].filepath = str(self.root / "a.mp3")
+        (self.root / "a.mp3").write_bytes(b"x")
+        restored = self.reload()[0]
+        self.assertEqual((restored.id, restored.title, restored.state), (job.id, "Song", "done"))
+        self.assertEqual(restored.to_dict()["audio_label"], "MP3 192k + original")
+        self.assertFalse(restored.tasks[0].missing)
+
+    def test_running_jobs_come_back_interrupted(self):
+        job = self.add(state="downloading")
+        job.tasks[0].state = "downloading"
+        restored = self.reload()[0]
+        self.assertEqual(restored.state, "interrupted")
+        self.assertEqual(restored.tasks[0].state, "interrupted")
+        self.assertIn("stopped", restored.error)
+
+    def test_missing_files_flagged(self):
+        job = self.add()
+        job.tasks[0].filepath = str(self.root / "gone.mp3")
+        job.tasks[0].files = [{"path": str(self.root / "gone.mp3"), "role": "converted"}]
+        restored = self.reload()[0]
+        self.assertTrue(restored.tasks[0].missing)
+        self.assertTrue(restored.tasks[0].files[0]["missing"])
+
+    def test_corrupt_file_is_moved_aside(self):
+        self.add()
+        server.save_state()
+        server.STATE_FILE.write_text("{not json")
+        server.JOBS.clear(), server.JOBS_ORDER.clear()
+        server.load_state()
+        self.assertEqual(server.JOBS_ORDER, [])
+        self.assertTrue(list(server.STATE_FILE.parent.glob("jobs.bad-*")))
+
+    def test_history_cap(self):
+        for _ in range(server.MAX_HISTORY + 5):
+            self.add()
+        with server.JOBS_LOCK:
+            server.trim_history()
+        self.assertEqual(len(server.JOBS_ORDER), server.MAX_HISTORY)
+        self.add(state="downloading")
+        with server.JOBS_LOCK:
+            server.trim_history()
+        self.assertEqual(len(server.JOBS_ORDER), server.MAX_HISTORY)
+        self.assertIn("downloading", [j.state for j in server.JOBS.values()])
+
+    def test_clear_finished_keeps_running(self):
+        self.add()
+        running = self.add(state="downloading")
+        self.assertEqual(server.clear_finished(), 1)
+        self.assertEqual(server.JOBS_ORDER, [running.id])
+
+    def test_retry_data_round_trips(self):
+        job = self.add(audio_format="flac", playlist=True, items="1-3", skip_existing=True, embed=True)
+        again = server.new_job(server.retry_data(job))
+        self.assertEqual(server.retry_data(again), server.retry_data(job))
+
+
 class ValidationTests(Base):
     def assertRejected(self, **kw):
         with self.assertRaises(ValueError):
