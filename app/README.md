@@ -43,12 +43,20 @@ Applies to **Audio only** and the audio file in **Separate** mode; ignored other
 | Choice | yt-dlp flags | Output |
 |---|---|---|
 | Original | — | native stream (`.webm`/`.m4a`), no re-encode |
-| MP3 | `-x --audio-format mp3 --audio-quality <q>` | `<title> [<id>].audio.mp3` |
-| WAV | `-x --audio-format wav` | `<title> [<id>].audio.wav`, 16-bit PCM |
+| MP3 | `-x --audio-format mp3 --audio-quality <q>` | `.audio.mp3` — Best = LAME VBR V0 (~245 kbps) |
+| M4A | `-x --audio-format m4a --audio-quality <q>` | `.audio.m4a` (AAC) — Best = 256 kbps |
+| Opus | `-x --audio-format opus --audio-quality <q>` | `.audio.opus` — Best = 160 kbps |
+| FLAC | `-x --audio-format flac` | `.audio.flac`, lossless |
+| WAV | `-x --audio-format wav` | `.audio.wav`, 16-bit PCM |
 
-**Bitrate** applies to lossy formats (MP3): **Best** = LAME VBR V0 (`--audio-quality 0`,
-~245 kbps), or constant **320 / 192 / 128 kbps** (`--audio-quality 320K` etc., which
-yt-dlp passes to ffmpeg as `-b:a`). For Original and WAV it is ignored.
+**Bitrate** applies to lossy formats (MP3, M4A, Opus): **Best** as listed above, or a
+fixed **320 / 192 / 128 kbps** (`--audio-quality 320K` etc., passed to ffmpeg as
+`-b:a`). It is ignored for Original, FLAC and WAV.
+
+**Stream copy:** when the source already uses the target codec (YouTube audio is
+usually Opus; archive.org often serves MP3), yt-dlp copies the stream instead of
+re-encoding it, so no quality is lost and the bitrate isn't applied. yt-dlp prints the
+source codec (`-O video:%(acodec)s`), and the task shows a note when this happens.
 
 yt-dlp downloads the best audio stream, runs ffmpeg, and deletes the source file.
 The task shows `converting` while ffmpeg runs. Converting to MP3 from Opus/AAC is
@@ -63,7 +71,7 @@ Same result, one less way to express the same thing.
 | Method | Path | Notes |
 |---|---|---|
 | `GET` | `/api/config` | ffmpeg presence, yt-dlp version, default/allowed paths, concurrency cap |
-| `POST` | `/api/jobs` | `{url, mode, quality, audio_format, audio_quality, outdir}` → job (`audio_format`: `native`/`mp3`/`wav`; `audio_quality`: `best`/`320`/`192`/`128`), or `400` with a readable `error` |
+| `POST` | `/api/jobs` | `{url, mode, quality, audio_format, audio_quality, outdir}` → job (`audio_format`: `native`/`mp3`/`m4a`/`opus`/`flac`/`wav`; `audio_quality`: `best`/`320`/`192`/`128`), or `400` with a readable `error` |
 | `GET` | `/api/jobs` | `{version, jobs: [...]}` newest first |
 | `GET` | `/api/jobs/{id}` | one job |
 | `POST` | `/api/jobs/{id}/cancel` | SIGTERMs the process group |

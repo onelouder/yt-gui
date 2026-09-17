@@ -134,6 +134,7 @@ button.ghost { color: var(--muted); }
 button.small { padding: 5px 10px; font-size: 13px; }
 
 .actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.note { margin: 4px 0 0; font-size: 12px; color: var(--muted); font-style: italic; }
 .hint { margin: 0; font-size: 13px; color: var(--muted); }
 .error {
   margin: 0;

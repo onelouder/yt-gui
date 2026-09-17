@@ -65,6 +65,22 @@ const CHECKS = [
          ['audio', 'mp3', '192'], 'restored settings');
     t.ok(!t.$('audio-quality').disabled, 'bitrate enabled after restore');
   `],
+  ['formats: six options, lossless disables bitrate, best label follows format', `
+    t.eq(t.opts('audio-format'), ['native', 'mp3', 'm4a', 'opus', 'flac', 'wav'], 'format list');
+    t.mode('audio');
+    for (const [f, off] of [['mp3', false], ['m4a', false], ['opus', false], ['flac', true], ['wav', true]]) {
+      t.set('audio-format', f);
+      t.eq(t.$('audio-quality').disabled, off, f + ' bitrate disabled');
+    }
+    t.set('audio-format', 'opus'); t.eq(t.$('audio-quality').options[0].textContent, 'Best (160 kbps)', 'opus best label');
+    t.set('audio-format', 'm4a');  t.eq(t.$('audio-quality').options[0].textContent, 'Best (256 kbps AAC)', 'm4a best label');
+    t.set('audio-format', 'flac'); t.ok(t.$('audio-hint').textContent.includes('Lossless'), 'flac hint');
+  `],
+  ['formats: copy note shows on the job card (live download)', `
+    const job = await t.post({ url: 'https://www.youtube.com/watch?v=jNQXAC9IVRw', mode: 'audio', audio_format: 'opus', audio_quality: '128', outdir: t.$('outdir').value });
+    const note = await t.until(() => document.querySelector('.job[data-id="' + job.id + '"] .note'), 60000);
+    t.ok(note.textContent.includes('bitrate not applied'), 'note text: ' + note.textContent);
+  `],
 ];
 
 // ---------------------------------------------------------------------------

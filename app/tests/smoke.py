@@ -70,6 +70,19 @@ SCENARIOS = [
       [{"ext": "mp3", "streams": ["audio:mp3"], "bitrate": (64, 320), "vbr": True}], files=1),
     S("wav-ignores-bitrate", {"url": YT, "mode": "audio", "audio_format": "wav", "audio_quality": "128"},
       [{"ext": "wav", "streams": ["audio:pcm_s16le"], "bitrate": (1000, 3000)}], files=1),
+    # -- sprint 2: FLAC / M4A / Opus -----------------------------------------
+    S("flac", {"url": YT, "mode": "audio", "audio_format": "flac"},
+      [{"ext": "flac", "streams": ["audio:flac"]}], files=1),
+    S("m4a-192", {"url": YT, "mode": "audio", "audio_format": "m4a", "audio_quality": "192"},
+      [{"ext": "m4a", "streams": ["audio:aac"], "bitrate": (170, 215), "no_note": True}], files=1),
+    S("m4a-best", {"url": YT, "mode": "audio", "audio_format": "m4a"},
+      [{"ext": "m4a", "streams": ["audio:aac"], "bitrate": (225, 285)}], files=1),
+    S("opus-copy-note", {"url": YT, "mode": "audio", "audio_format": "opus", "audio_quality": "128"},
+      [{"ext": "opus", "streams": ["audio:opus"], "note": "bitrate not applied"}], files=1),
+    S("archive-flac", {"url": ARCHIVE, "mode": "audio", "audio_format": "flac"},
+      [{"ext": "flac", "streams": ["audio:flac"]}], files=1),
+    S("archive-mp3-copy", {"url": ARCHIVE, "mode": "audio", "audio_format": "mp3"},
+      [{"ext": "mp3", "streams": ["audio:mp3"], "note": "already MP3"}], files=1),
     S("bad-bitrate-rejected", {"url": YT, "mode": "audio", "audio_format": "mp3", "audio_quality": "999"},
       [], http=400),
 ]
@@ -172,6 +185,11 @@ def check_job(sc: dict, job: dict, scdir: Path) -> list[str]:
             continue
         if task.get("filepath"):
             errs += [f"task {i} ({task['label']}): {e}" for e in check_file(task["filepath"], exp)]
+        notes = " | ".join(task.get("notes") or [])
+        if "note" in exp and exp["note"] not in notes:
+            errs.append(f"task {i}: note {exp['note']!r} not in {notes!r}")
+        if exp.get("no_note") and notes:
+            errs.append(f"task {i}: unexpected note {notes!r}")
     files = [f for f in scdir.rglob("*") if f.is_file() and not f.name.startswith(".")]
     if "files" in sc and len(files) != sc["files"]:
         errs.append(f"{len(files)} files in dir != {sc['files']}: {[f.name for f in files]}")

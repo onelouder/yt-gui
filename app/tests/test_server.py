@@ -114,6 +114,48 @@ class BitrateTests(Base):
         self.assertEqual(self.job(mode="audio", audio_format="wav").to_dict()["audio_label"], "WAV")
 
 
+class FormatTests(Base):
+    def argv(self, **kw):
+        return self.argvs(self.job(mode="audio", **kw))[0]
+
+    def opt(self, argv, name):
+        return argv[argv.index(name) + 1] if name in argv else None
+
+    def test_every_convert_format(self):
+        expect = {"mp3": "0", "m4a": "256K", "opus": "160K", "flac": None, "wav": None}
+        for key, best in expect.items():
+            with self.subTest(fmt=key):
+                argv = self.argv(audio_format=key)
+                self.assertEqual(self.opt(argv, "--audio-format"), key)
+                self.assertEqual(self.opt(argv, "--audio-quality"), best)
+
+    def test_lossless_flags(self):
+        for key in ("flac", "wav"):
+            f = server.AUDIO_FORMATS[key]
+            self.assertTrue(f.lossless)
+            self.assertFalse(f.bitrate_ok)
+        self.assertFalse(server.AUDIO_FORMATS["native"].bitrate_ok)
+
+    def test_codec_family(self):
+        cf = server.codec_family
+        self.assertEqual(cf("opus", "webm"), "opus")
+        self.assertEqual(cf("mp4a.40.2", "m4a"), "aac")
+        self.assertEqual(cf(None, "mp3"), "mp3")
+        self.assertEqual(cf("NA", "m4a"), "aac")
+        self.assertIsNone(cf("none", "webm"))
+
+    def test_source_notes(self):
+        step = self.job(mode="audio", audio_format="opus", audio_quality="128").plan[0]
+        self.assertIn("bitrate not applied", server.source_note(step, "opus", "webm"))
+        self.assertIsNone(server.source_note(step, "mp4a.40.2", "m4a"))
+        mp3 = self.job(mode="audio", audio_format="mp3").plan[0]
+        self.assertEqual(server.source_note(mp3, "NA", "mp3"), "Source is already MP3: copied without re-encoding.")
+        wav = self.job(mode="audio", audio_format="wav").plan[0]
+        self.assertIsNone(server.source_note(wav, "pcm_s16le", "wav"))
+        native = self.job(mode="audio").plan[0]
+        self.assertIsNone(server.source_note(native, "opus", "webm"))
+
+
 class ValidationTests(Base):
     def assertRejected(self, **kw):
         with self.assertRaises(ValueError):

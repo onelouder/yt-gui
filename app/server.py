@@ -37,6 +37,7 @@ PROBE_TIMEOUT = 90
 P = "@@P@@"
 PP = "@@PP@@"
 F = "@@F@@"
+SRC = "@@S@@"
 
 PROGRESS_TMPL = (
     "download:" + P + "%(progress.status)s|%(progress.downloaded_bytes)s|"
@@ -53,8 +54,10 @@ class AudioFormat:
     key: str
     label: str
     codec: str | None        # yt-dlp --audio-format value; None = keep the source stream
+    family: str | None = None  # source codec family yt-dlp stream-copies instead of encoding
     lossless: bool = False
     best: str | None = None  # --audio-quality for "best"; None = let the encoder decide
+    best_label: str = "Best"
 
     @property
     def bitrate_ok(self) -> bool:
@@ -65,9 +68,24 @@ class AudioFormat:
 # ffmpeg via yt-dlp's -x (FFmpegExtractAudio).
 AUDIO_FORMATS = {f.key: f for f in (
     AudioFormat("native", "Original", None),
-    AudioFormat("mp3", "MP3", "mp3", best="0"),  # LAME VBR V0, ~245 kbps
+    AudioFormat("mp3", "MP3", "mp3", "mp3", best="0", best_label="Best (VBR ~245 kbps)"),
+    # ffmpeg's native AAC VBR mode is weak, and yt-dlp maps VBR numbers to nothing
+    # for libopus, so "best" means a fixed high bitrate for these two.
+    AudioFormat("m4a", "M4A", "m4a", "aac", best="256K", best_label="Best (256 kbps AAC)"),
+    AudioFormat("opus", "Opus", "opus", "opus", best="160K", best_label="Best (160 kbps)"),
+    AudioFormat("flac", "FLAC", "flac", "flac", lossless=True),
     AudioFormat("wav", "WAV", "wav", lossless=True),
 )}
+
+
+def codec_family(acodec: str | None, ext: str | None) -> str | None:
+    """Normalize yt-dlp's acodec (or, when unset, the extension) to a codec family."""
+    a = (acodec or "").lower()
+    if a in ("", "none", "na"):
+        return {"mp3": "mp3", "m4a": "aac", "aac": "aac", "opus": "opus", "flac": "flac"}.get(ext or "")
+    if a.startswith("mp4a") or a == "aac":
+        return "aac"
+    return a.split(".")[0]
 
 # Values over 10 make yt-dlp pass `-b:a <n>k` (constant bitrate).
 AUDIO_QUALITIES = {"best": None, "320": "320K", "192": "192K", "128": "128K"}
@@ -155,6 +173,7 @@ class Task:
         self.eta = None
         self.filepath = None
         self.error = None
+        self.notes: list[str] = []
 
     @property
     def percent(self):
@@ -176,6 +195,7 @@ class Task:
             "eta": self.eta,
             "filepath": self.filepath,
             "error": self.error,
+            "notes": self.notes,
         }
 
 
@@ -290,6 +310,7 @@ def base_argv() -> list[str]:
         "--trim-filenames", "180",
         "--progress-template", PROGRESS_TMPL,
         "--progress-template", POSTPROC_TMPL,
+        "-O", "video:" + SRC + "%(acodec)s|%(ext)s",
         "-O", "after_move:" + F + "%(filepath)s",
     ]
 
@@ -377,6 +398,8 @@ class Step:
     fmt: str
     outtmpl: str
     extra: list[str] = field(default_factory=list)
+    audio: AudioFormat | None = None  # set when this step converts audio
+    audio_quality: str = "best"
 
 
 def task_argv(job: Job, step: Step) -> list[str]:
@@ -426,6 +449,12 @@ def run_task(job: Job, step: Step) -> None:
                 status = line[len(PP):].split("|")[0]
                 if status in ("started", "processing"):
                     task.state = task.pp_state
+                bump()
+            elif line.startswith(SRC):
+                acodec, _, ext = line[len(SRC):].partition("|")
+                note = source_note(step, acodec, ext)
+                if note:
+                    task.notes.append(note)
                 bump()
             elif line.startswith(F):
                 task.filepath = line[len(F):].strip()
@@ -512,6 +541,15 @@ def extract_argv(fmt: AudioFormat, quality: str) -> list[str]:
     return argv
 
 
+def source_note(step: Step, acodec: str, ext: str) -> str | None:
+    """Explain when yt-dlp will stream-copy instead of encoding what was asked."""
+    fmt = step.audio
+    if not fmt or not fmt.family or codec_family(acodec, ext) != fmt.family:
+        return None
+    msg = f"Source is already {fmt.label}: copied without re-encoding"
+    return msg + " (bitrate not applied)." if step.audio_quality != "best" else msg + "."
+
+
 def audio_step(job: Job) -> Step:
     fmt = AUDIO_FORMATS[job.audio_format]
     if fmt.codec:
@@ -519,7 +557,7 @@ def audio_step(job: Job) -> Step:
         # -x picks the final extension itself, so %(ext)s ends up .mp3/.wav.
         # Any file with an audio track will do; ffmpeg drops the video.
         return Step(t, f"{AUDIO_SELECTOR}/best", f"{STEM}.audio.%(ext)s",
-                    extract_argv(fmt, job.audio_quality))
+                    extract_argv(fmt, job.audio_quality), fmt, job.audio_quality)
     return Step(Task("audio", "Audio"), AUDIO_SELECTOR, f"{STEM}.audio.%(ext)s")
 
 
@@ -795,7 +833,7 @@ def config_payload():
         "qualities": list(QUALITIES),
         "audio_formats": [
             {"key": f.key, "label": f.label, "convert": f.codec is not None,
-             "lossless": f.lossless, "bitrate_ok": f.bitrate_ok}
+             "lossless": f.lossless, "bitrate_ok": f.bitrate_ok, "best_label": f.best_label}
             for f in AUDIO_FORMATS.values()
         ],
         "audio_qualities": [{"key": k, "label": v} for k, v in AUDIO_QUALITY_LABELS.items()],

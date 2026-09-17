@@ -15,17 +15,20 @@ const MODE_HINTS = {
 const AUDIO_DESC = {
   native: 'no re-encode',
   mp3: 'lossy',
+  m4a: 'AAC, lossy',
+  opus: 'lossy',
+  flac: 'lossless',
   wav: 'uncompressed',
 };
 
+const COPY_NOTE = ' If the source already uses this codec, the stream is copied without re-encoding and the bitrate is not applied.';
 const AUDIO_HINTS = {
   native: 'The audio stream is saved exactly as the site serves it (usually .webm or .m4a).',
-  mp3: 'Re-encoded to MP3 with ffmpeg after downloading. Best = LAME VBR V0 (~245 kbps); fixed bitrates are CBR.',
+  mp3: 'Re-encoded to MP3 with ffmpeg after downloading. Best = LAME VBR V0 (~245 kbps); fixed bitrates are CBR.' + COPY_NOTE,
+  m4a: 'Encoded to AAC in an .m4a file — plays everywhere Apple does.' + COPY_NOTE,
+  opus: 'Encoded to Opus — the smallest files for the quality. YouTube audio is usually Opus already.' + COPY_NOTE,
+  flac: 'Lossless FLAC. It cannot restore quality the source never had, but nothing further is lost.',
   wav: 'Decoded to uncompressed 16-bit WAV with ffmpeg — about 10 MB per minute.',
-};
-
-const BEST_LABEL = {
-  mp3: 'Best (VBR ~245 kbps)',
 };
 
 const audioFormat = (key) => config?.audio_formats?.find((f) => f.key === key);
@@ -109,7 +112,7 @@ function syncMode() {
   $('audio-format').disabled = !hasAudioFile;
   $('audio-quality').disabled = !hasAudioFile || !fmt?.bitrate_ok;
   const best = $('audio-quality').querySelector('option[value=best]');
-  if (best) best.textContent = BEST_LABEL[fmt?.key] || 'Best';
+  if (best) best.textContent = fmt?.best_label || 'Best';
   let audioHint = hasAudioFile ? (AUDIO_HINTS[fmt?.key] || '') : 'Audio format applies to Audio only and Separate modes.';
   if (hasAudioFile && config && !(config.ffmpeg && config.ffprobe)) audioHint += ' Conversion needs ffmpeg and ffprobe on PATH.';
   $('audio-hint').textContent = audioHint;
@@ -145,6 +148,7 @@ function renderTask(task) {
   wrap.append(track);
 
   if (task.filepath) wrap.append(el('div', 'file', task.filepath));
+  (task.notes || []).forEach((n) => wrap.append(el('p', 'note', n)));
   if (task.error) wrap.append(el('p', 'error', task.error));
   return wrap;
 }
