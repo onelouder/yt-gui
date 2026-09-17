@@ -33,6 +33,9 @@ const AUDIO_HINTS = {
 
 const ACTIVE_TASK = ['queued', 'downloading', 'merging', 'converting', 'tagging', 'embedding art'];
 
+const TERMINAL_TASK = ['done', 'failed', 'skipped', 'cancelled'];
+const itemsOpen = new Map();  // job id -> the user's own expand/collapse choice
+
 const audioFormat = (key) => config?.audio_formats?.find((f) => f.key === key);
 
 // --------------------------------------------------------------------- utils
@@ -117,6 +120,13 @@ function syncMode() {
   $('audio-quality').disabled = !hasAudioFile || !fmt?.bitrate_ok;
   $('keep-original').disabled = !hasAudioFile || !fmt?.convert;
   $('embed').disabled = !hasAudioFile || !config?.ffmpeg;
+
+  const playlist = $('playlist').checked;
+  $('items').disabled = !playlist;
+  $('skip-existing').disabled = !playlist;
+  $('playlist-hint').textContent = playlist
+    ? `Every item is downloaded separately, up to ${config?.max_playlist_items || 200}, into a folder named after the playlist. One failed item does not stop the others.`
+    : 'Off: a playlist URL downloads only the single video it points at.';
   const best = $('audio-quality').querySelector('option[value=best]');
   if (best) best.textContent = fmt?.best_label || 'Best';
   let audioHint = hasAudioFile ? (AUDIO_HINTS[fmt?.key] || '') : 'Audio format applies to Audio only and Separate modes.';
@@ -168,6 +178,42 @@ function renderTask(task) {
   return wrap;
 }
 
+function renderPlaylist(job) {
+  const wrap = el('div', 'playlist');
+  const tasks = job.tasks || [];
+  const count = (s) => tasks.filter((t) => t.state === s).length;
+  const total = tasks.length || job.playlist_count || 0;
+  const failed = count('failed');
+  const got = count('done') + count('skipped');  // items that ended with a file (or already had one)
+
+  const bits = [`${count('done')} / ${total || '?'} done`];
+  if (failed) bits.push(`${failed} failed`);
+  if (count('skipped')) bits.push(`${count('skipped')} skipped`);
+  if (count('cancelled')) bits.push(`${count('cancelled')} cancelled`);
+
+  const head = el('div', 'task-head');
+  head.append(el('span', 'task-name', job.playlist_title ? `Playlist · ${job.playlist_title}` : 'Playlist'));
+  head.append(el('span', 'task-num', bits.join('  ·  ')));
+  wrap.append(head);
+
+  const track = el('div', 'track');
+  const fill = el('div', `fill ${failed ? 'failed' : got === total && total ? 'done' : 'downloading'}`);
+  fill.style.width = `${total ? (got / total) * 100 : 0}%`;
+  track.append(fill);
+  wrap.append(track);
+
+  if (!tasks.length) return wrap;
+
+  const details = el('details', 'items');
+  // the user's choice wins; otherwise open short lists and anything with a failure
+  details.open = itemsOpen.get(job.id) ?? (failed > 0 || tasks.length <= 4);
+  details.addEventListener('toggle', () => itemsOpen.set(job.id, details.open));
+  details.append(el('summary', null, `${tasks.length} item${tasks.length === 1 ? '' : 's'}`));
+  tasks.forEach((t) => details.append(renderTask(t)));
+  wrap.append(details);
+  return wrap;
+}
+
 function renderJob(job) {
   const card = el('div', 'job');
   card.dataset.id = job.id;
@@ -178,11 +224,16 @@ function renderJob(job) {
   card.append(head);
 
   const q = job.mode === 'audio' ? 'best audio' : job.quality === 'best' ? 'best' : `${job.quality}p`;
+  const pl = job.playlist ? ` · playlist${job.items ? ` ${job.items}` : ''}` : '';
   const af = job.audio_format && job.audio_format !== 'native' ? ` · ${job.audio_label}` : '';
-  card.append(el('p', 'job-sub', `${job.mode_label} · ${q}${af} · ${job.outdir}`));
+  card.append(el('p', 'job-sub', `${job.mode_label} · ${q}${af}${pl} · ${job.outdir}`));
   if (job.title) card.append(el('p', 'job-sub', job.url));
 
-  job.tasks.forEach((t) => card.append(renderTask(t)));
+  if (job.playlist) {
+    card.append(renderPlaylist(job));
+  } else {
+    job.tasks.forEach((t) => card.append(renderTask(t)));
+  }
 
   if (job.error) card.append(el('p', 'error', job.error));
 
@@ -207,6 +258,9 @@ function renderJob(job) {
     $('audio-quality').value = job.audio_quality || 'best';
     $('keep-original').checked = !!job.keep_original;
     $('embed').checked = !!job.embed;
+    $('playlist').checked = !!job.playlist;
+    $('items').value = job.items || '';
+    $('skip-existing').checked = !!job.skip_existing;
     $('outdir').value = job.outdir;
     syncMode();
     $('url').focus();
@@ -247,7 +301,7 @@ async function poll() {
 
 // --------------------------------------------------------------------- form
 form.addEventListener('change', (e) => {
-  if (['mode', 'audio_format', 'embed'].includes(e.target.name)) syncMode();
+  if (['mode', 'audio_format', 'embed', 'playlist'].includes(e.target.name)) syncMode();
 });
 
 $('reset-path').addEventListener('click', () => {
@@ -270,6 +324,9 @@ form.addEventListener('submit', async (e) => {
     audio_quality: $('audio-quality').value,
     keep_original: !$('keep-original').disabled && $('keep-original').checked,
     embed: !$('embed').disabled && $('embed').checked,
+    playlist: $('playlist').checked,
+    items: $('items').value.trim(),
+    skip_existing: $('skip-existing').checked,
     outdir: $('outdir').value.trim(),
   };
 

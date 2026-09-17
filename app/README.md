@@ -91,12 +91,36 @@ The PRD lists `audio-only: best audio` as a quality value; here that is the
 **Audio only** mode instead, and the quality control is disabled while it's selected.
 Same result, one less way to express the same thing.
 
+## Playlists
+
+Off by default: a `watch?v=…&list=…` URL still downloads the single video. Tick
+**Download whole playlist** and each item is downloaded by its own yt-dlp run:
+
+- **Probe** — `yt-dlp -J --flat-playlist --yes-playlist [-I items]` lists the entries
+  cheaply; `requested_entries` gives their real positions.
+- **Run** — one process per item, `--yes-playlist -I <n>` against the *playlist* URL, so
+  `%(playlist_title)s` and `%(playlist_index)s` stay available. Files land in
+  `<playlist title>/001 - <title> [<id>].<ext>`.
+- **Failures are per item.** A private, deleted or geo-blocked entry marks that item
+  failed and the rest continue; the job ends `done`, `partial`, or `failed` if every
+  item failed.
+- **Items** accepts `1-10`, `1,4,7-9` or `3` (validated against `^\d+(-\d+)?(,…)*$`).
+- **Cap:** `--max-playlist-items` (default 200) — above it the job fails and suggests a range.
+- **Skip items already downloaded** adds `--download-archive`, one file per output kind
+  (`.yt-gui-archive-audio-mp3.txt`, `.yt-gui-archive-video.txt`, …) inside the output
+  folder, so Separate mode and re-runs in another format aren't skipped by each other.
+  A skipped item shows as `skipped` with a note.
+- **With tags on**, `--parse-metadata` maps `playlist_index` to the track number and
+  `playlist_title` to the album.
+- A playlist job holds one concurrency slot and runs its items one after another;
+  cancelling stops the current item and skips the rest.
+
 ## API
 
 | Method | Path | Notes |
 |---|---|---|
 | `GET` | `/api/config` | ffmpeg presence, yt-dlp version, default/allowed paths, concurrency cap |
-| `POST` | `/api/jobs` | `{url, mode, quality, audio_format, audio_quality, keep_original, embed, outdir}` → job (`audio_format`: `native`/`mp3`/`m4a`/`opus`/`flac`/`wav`; `audio_quality`: `best`/`320`/`192`/`128`), or `400` with a readable `error` |
+| `POST` | `/api/jobs` | `{url, mode, quality, audio_format, audio_quality, keep_original, embed, playlist, items, skip_existing, outdir}` → job (`audio_format`: `native`/`mp3`/`m4a`/`opus`/`flac`/`wav`; `audio_quality`: `best`/`320`/`192`/`128`), or `400` with a readable `error` |
 | `GET` | `/api/jobs` | `{version, jobs: [...]}` newest first |
 | `GET` | `/api/jobs/{id}` | one job |
 | `POST` | `/api/jobs/{id}/cancel` | SIGTERMs the process group |
@@ -141,7 +165,7 @@ don't touch a running instance. Test URLs are in `app/tests/fixtures.json`.
 
 ## Known limits (v1, per PRD §3)
 
-- One URL per job; playlist URLs are rejected with an explanatory message.
+- One URL per job (a playlist counts as one job).
 - No cookies/login, subtitles, thumbnails, SponsorBlock, trimming or remuxing.
 - Job state lives in memory: a server restart clears the list, files stay on disk.
 - In **Merged** mode the percentage steps back once when yt-dlp moves from the

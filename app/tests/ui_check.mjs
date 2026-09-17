@@ -116,6 +116,27 @@ const CHECKS = [
     t.ok(card.textContent.includes('MP3 best + tags'), 'label');
     t.ok(card.querySelector('.file').textContent.endsWith('.mp3'), 'file row');
   `],
+  ['playlist: controls gate on the checkbox', `
+    t.ok(t.$('items').disabled && t.$('skip-existing').disabled, 'items/skip off by default');
+    t.ok(t.$('playlist-hint').textContent.includes('only the single video'), 'off hint');
+    t.set('playlist', true);
+    t.ok(!t.$('items').disabled && !t.$('skip-existing').disabled, 'enabled with playlist');
+    t.ok(t.$('playlist-hint').textContent.includes('folder named after the playlist'), 'on hint');
+  `],
+  ['playlist: card summarises items and collapses the list (live probe)', `
+    const job = await t.post({ url: 'https://www.youtube.com/playlist?list=PL6IaIsEjSbf96XFRuNccS_RuEXwNdsoEu', mode: 'audio', playlist: true, outdir: t.$('outdir').value });
+    const card = await t.until(() => { const c = document.querySelector('.job[data-id="' + job.id + '"]'); return c && c.querySelector('.items summary') && c; }, 90000);
+    const state = await (await fetch('/api/jobs/' + job.id)).json();
+    t.ok(card.querySelector('.items summary').textContent === '4 items', 'summary: ' + card.querySelector('.items summary').textContent + ' job: ' + JSON.stringify({ posted: job, state }).slice(0, 700));
+    t.ok(card.querySelector('.playlist .task-name').textContent.includes('JODA15'), 'playlist title');
+    t.ok(card.textContent.includes('· playlist ·') || card.textContent.includes('· playlist'), 'subtitle mentions playlist');
+    t.ok(card.querySelectorAll('.items .task').length === 4, 'four item rows');
+    const details = card.querySelector('details.items');
+    details.open = false; details.dispatchEvent(new Event('toggle'));
+    await fetch('/api/jobs/' + job.id + '/cancel', { method: 'POST' });
+    await t.until(() => document.querySelector('.job[data-id="' + job.id + '"] .state.cancelled'), 30000);
+    t.ok(!document.querySelector('.job[data-id="' + job.id + '"] details.items').open, 'stays collapsed after re-render');
+  `],
 ];
 
 // ---------------------------------------------------------------------------

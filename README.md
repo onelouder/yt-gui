@@ -7,6 +7,7 @@ only), choose a folder, and download. Everything runs on your own machine.
 - **Standard library only:** one Python file for the server and a static page. Nothing to `pip install`, no build step.
 - **Four download modes** plus a quality cap (best / 1080p / 720p / 480p).
 - **Audio conversion** to **MP3**, **M4A**, **Opus** (choice of bitrate), **FLAC** or **WAV** using ffmpeg, or keep the original stream.
+- **Playlists** (opt-in): every item downloaded separately, numbered, with per-item failures.
 - **Cover art and tags** (title, artist, chapters) embedded in the audio file.
 - **Live progress** for each file (percent, speed, ETA) over Server-Sent Events, and a cancel button.
 - **Clear errors**, with hints for bot checks, age limits, geo-blocking and missing ffmpeg.
@@ -62,6 +63,13 @@ python3 app/server.py --port 9000 \
 Tick **Keep original file** to keep the untouched download next to the converted one.
 If the source already uses the chosen codec, the stream is copied without re-encoding
 and the job card says so.
+
+## Playlists
+
+Tick **Download whole playlist** to fetch every item into a folder named after the
+playlist, numbered `001 - …`. You can limit the range (`1-10`, `1,4,7-9`), skip items
+already downloaded, and one failed item won't stop the rest. Without the tick, a
+playlist URL downloads only the video it points at.
 
 ## Security
 

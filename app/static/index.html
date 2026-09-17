@@ -19,6 +19,19 @@
       <input id="url" name="url" type="url" placeholder="https://…" required spellcheck="false">
     </label>
 
+    <div class="row" id="playlist-row">
+      <div class="field checks">
+        <span class="label">Playlist</span>
+        <label class="check"><input type="checkbox" id="playlist" name="playlist"> Download whole playlist</label>
+        <label class="check"><input type="checkbox" id="skip-existing" name="skip_existing"> Skip items already downloaded</label>
+      </div>
+      <label class="field">
+        <span class="label">Items</span>
+        <input id="items" name="items" type="text" spellcheck="false" placeholder="all — or 1-10, 1,4,7-9">
+      </label>
+    </div>
+    <p class="hint" id="playlist-hint"></p>
+
     <fieldset class="field">
       <legend class="label">Mode</legend>
       <div class="segmented" id="mode-group">

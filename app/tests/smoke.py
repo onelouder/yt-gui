@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import socket
 import subprocess
@@ -27,6 +28,9 @@ SERVER = HERE.parent / "server.py"
 FIX = json.loads((HERE / "fixtures.json").read_text())
 YT = FIX["youtube"]
 ARCHIVE = FIX["archive_mp3"]
+PLAYLIST = FIX["playlist"]
+PL_ITEM_URL = FIX["playlist_item_url"]
+PL_TITLE = FIX["playlist_title"]
 MUTAGEN = False    # set from /api/config at startup; decides Opus/FLAC cover expectations
 MP4TAGGER = False  # mutagen or AtomicParsley available: decides M4A cover expectations
 TERMINAL = {"done", "failed", "cancelled", "partial", "interrupted"}
@@ -115,8 +119,94 @@ SCENARIOS = [
     S("separate-mp3-keep-embed", {"url": YT, "mode": "separate", "quality": "480", "audio_format": "mp3",
                                   "keep_original": True, "embed": True},
       [{"streams": ["video:*"]}, {"ext": "mp3", "cover": True, "tags": ["title"]}], files=3),
+    # -- sprint 5: playlists --------------------------------------------------
+    S("playlist-mp3-range", {"url": PLAYLIST, "mode": "audio", "audio_format": "mp3",
+                             "audio_quality": "128", "embed": True, "playlist": True, "items": "3-4"},
+      [{"ext": "mp3", "tags": ["title", "track", "album"]}, {"ext": "mp3", "tags": ["track"]}],
+      files=2, paths=[f"{PL_TITLE}/003 - .*\\.audio\\.mp3", f"{PL_TITLE}/004 - .*\\.audio\\.mp3"]),
+    S("playlist-off-takes-one-video", {"url": PL_ITEM_URL, "mode": "audio"},
+      [{"streams": ["audio:*"]}], files=1),
+    S("playlist-bad-items-rejected", {"url": PLAYLIST, "playlist": True, "items": "1;rm -rf /"},
+      [], http=400),
+
     S("bad-bitrate-rejected", {"url": YT, "mode": "audio", "audio_format": "mp3", "audio_quality": "999"},
       [], http=400),
+]
+
+
+def wait_job(port, job_id, until, timeout=600):
+    """Poll one job until `until(job)` is true; returns the job or raises."""
+    end = time.time() + timeout
+    while time.time() < end:
+        _, job = api(port, "GET", f"/api/jobs/{job_id}")
+        if until(job):
+            return job
+        time.sleep(1)
+    raise TimeoutError(f"job {job_id} never satisfied {until.__name__}: state={job.get('state')}")
+
+
+def terminal(job):
+    return job["state"] in TERMINAL
+
+
+def rerun_skips_existing(port, scdir):
+    """Same playlist item twice with skip_existing: second run downloads nothing."""
+    body = {"url": PLAYLIST, "mode": "audio", "audio_format": "mp3", "playlist": True,
+            "items": "4", "skip_existing": True, "outdir": str(scdir)}
+    errs = []
+    status, job = api(port, "POST", "/api/jobs", body)
+    first = wait_job(port, job["id"], terminal)
+    if first["state"] != "done":
+        return [f"first run {first['state']}: {first.get('error')}"]
+    files = sorted(p.name for p in scdir.rglob("*.mp3"))
+
+    status, job2 = api(port, "POST", "/api/jobs", body)
+    second = wait_job(port, job2["id"], terminal)
+    if second["state"] != "done":
+        errs.append(f"second run {second['state']}: {second.get('error')}")
+    states = [t["state"] for t in second["tasks"]]
+    if states != ["skipped"]:
+        errs.append(f"second run task states {states} != ['skipped']")
+    elif "Already downloaded" not in " ".join(second["tasks"][0].get("notes") or []):
+        errs.append("no 'already downloaded' note on the skipped task")
+    if sorted(p.name for p in scdir.rglob("*.mp3")) != files:
+        errs.append("second run changed the files on disk")
+    archives = [p.name for p in scdir.rglob(".yt-gui-archive-*")]
+    if archives != [".yt-gui-archive-audio-mp3.txt"]:
+        errs.append(f"archive files {archives}")
+    return errs
+
+
+def cancel_mid_playlist(port, scdir):
+    """Cancel after the first item finishes: the rest stop, the finished file stays."""
+    body = {"url": PLAYLIST, "mode": "audio", "playlist": True, "outdir": str(scdir)}
+    errs = []
+    _, job = api(port, "POST", "/api/jobs", body)
+
+    def first_done(j):
+        return any(t["state"] in ("done", "failed") for t in j["tasks"])
+
+    wait_job(port, job["id"], first_done)
+    api(port, "POST", f"/api/jobs/{job['id']}/cancel")
+    final = wait_job(port, job["id"], terminal, timeout=120)
+    if final["state"] != "cancelled":
+        errs.append(f"state {final['state']} != cancelled")
+    states = [t["state"] for t in final["tasks"]]
+    if states[0] != "done":
+        errs.append(f"first item {states[0]} != done")
+    if any(s not in ("cancelled", "queued", "skipped") for s in states[1:]):
+        errs.append(f"later items not stopped: {states[1:]}")
+    if len(list(scdir.rglob("*.webm"))) + len(list(scdir.rglob("*.m4a"))) < 1:
+        errs.append("the finished item's file is missing")
+    leftover = subprocess.run(["pgrep", "-af", "yt-dlp"], capture_output=True, text=True).stdout
+    if str(scdir) in leftover:
+        errs.append(f"yt-dlp still running: {leftover.strip()}")
+    return errs
+
+
+SCENARIOS += [
+    {"name": "playlist-rerun-skips", "custom": rerun_skips_existing},
+    {"name": "playlist-cancel", "custom": cancel_mid_playlist},
 ]
 
 
@@ -233,7 +323,11 @@ def check_job(sc: dict, job: dict, scdir: Path) -> list[str]:
             errs.append(f"task {i}: note {exp['note']!r} not in {notes!r}")
         if exp.get("no_note") and notes:
             errs.append(f"task {i}: unexpected note {notes!r}")
-    files = [f for f in scdir.rglob("*") if f.is_file() and not f.name.startswith(".")]
+    files = sorted(f for f in scdir.rglob("*") if f.is_file() and not f.name.startswith("."))
+    if "paths" in sc:
+        rel = [str(f.relative_to(scdir)) for f in files]
+        if len(rel) != len(sc["paths"]) or not all(re.fullmatch(pat, r) for pat, r in zip(sc["paths"], rel)):
+            errs.append(f"paths {rel} do not match {sc['paths']}")
     if "files" in sc and len(files) != sc["files"]:
         errs.append(f"{len(files)} files in dir != {sc['files']}: {[f.name for f in files]}")
     leftovers = [f.name for f in files if f.suffix in (".part", ".ytdl") or ".temp." in f.name]
@@ -282,7 +376,10 @@ def main():
               f"· {len(chosen)} scenarios · {tmp}")
 
         started = {}
+        customs = [sc for sc in chosen if "custom" in sc]
         for sc in chosen:
+            if "custom" in sc:
+                continue
             scdir = tmp / sc["name"]
             body = {**sc["request"], "outdir": str(scdir)}
             status, job = api(port, "POST", "/api/jobs", body)
@@ -308,6 +405,16 @@ def main():
             time.sleep(1)
         for sc, _ in pending.values():
             results.append((sc["name"], [f"timed out after {args.timeout}s"]))
+
+        for sc in customs:
+            scdir = tmp / sc["name"]
+            scdir.mkdir(parents=True, exist_ok=True)
+            try:
+                errs = sc["custom"](port, scdir)
+            except Exception as exc:  # noqa: BLE001 - reported as a failure
+                errs = [f"{type(exc).__name__}: {exc}"]
+            results.append((sc["name"], errs))
+            print(f"  {'PASS' if not errs else 'FAIL'}  {sc['name']}", flush=True)
     finally:
         proc.terminate()
         proc.wait(timeout=10)

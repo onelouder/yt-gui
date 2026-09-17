@@ -265,6 +265,117 @@ class EmbedTests(Base):
             self.job(mode="audio", embed=1)
 
 
+class PlaylistTests(Base):
+    def entries(self, n=3, start=1):
+        return {"_type": "playlist", "title": "Mix", "playlist_count": n,
+                "requested_entries": list(range(start, start + n)),
+                "entries": [{"id": f"v{i}", "title": f"Song {i}"} for i in range(start, start + n)]}
+
+    def plan(self, info=None, **kw):
+        kw.setdefault("mode", "audio")
+        job = self.job(playlist=True, **kw)
+        job.plan = server.playlist_plan(job, server.playlist_entries(job, info or self.entries()))
+        job.tasks = [s.task for s in job.plan]
+        return job
+
+    def test_no_tasks_before_the_probe(self):
+        job = self.job(playlist=True, mode="audio")
+        self.assertEqual((job.plan, job.tasks), ([], []))
+
+    def test_single_video_url_with_playlist_ticked(self):
+        real = server.probe
+        server.probe = lambda job, flat=False: {"_type": "video", "title": "One", "formats": []}
+        try:
+            job = self.job(playlist=True, mode="audio")
+            server.prepare(job)
+        finally:
+            server.probe = real
+        self.assertFalse(job.playlist)
+        self.assertEqual([t.key for t in job.tasks], ["audio"])
+        self.assertEqual(job.title, "One")
+
+    def test_items_validation(self):
+        for good in ("1-10", "1,4,7-9", "3"):
+            self.assertEqual(self.job(playlist=True, items=good).items, good)
+        for bad in ("1;rm -rf /", "abc", "1-", "-2", "1..3", "1 2"):
+            with self.subTest(items=bad), self.assertRaises(ValueError):
+                self.job(playlist=True, items=bad)
+
+    def test_items_ignored_without_playlist(self):
+        job = self.job(items="1-3", skip_existing=True)
+        self.assertEqual((job.items, job.skip_existing), ("", False))
+
+    def test_one_step_per_entry_with_indices(self):
+        job = self.plan(self.entries(3, start=5))
+        self.assertEqual([t.key for t in job.tasks], ["5:audio", "6:audio", "7:audio"])
+        self.assertEqual(job.tasks[0].label, "005 · Song 5")
+        for i, step in zip((5, 6, 7), job.plan):
+            argv = server.task_argv(job, step)
+            self.assertNotIn("--no-playlist", argv)
+            self.assertEqual(argv[argv.index("-I") + 1], str(i))
+            self.assertIn("--yes-playlist", argv)
+            self.assertIn("%(playlist_index)03d", step.outtmpl)
+
+    def test_separate_makes_two_tasks_per_entry(self):
+        job = self.plan(self.entries(2), mode="separate")
+        self.assertEqual([t.key for t in job.tasks], ["1:video", "1:audio", "2:video", "2:audio"])
+        self.assertTrue(job.tasks[0].label.endswith("Video"))
+
+    def test_archive_per_kind(self):
+        job = self.plan(self.entries(1), mode="separate", audio_format="mp3", skip_existing=True)
+        archives = [Path(s.archive).name for s in job.plan]
+        self.assertEqual(archives, [".yt-gui-archive-video.txt", ".yt-gui-archive-audio-mp3.txt"])
+        job = self.plan(self.entries(1))
+        self.assertIsNone(job.plan[0].archive)
+
+    def test_track_tags_when_embedding(self):
+        job = self.plan(self.entries(1), audio_format="mp3", embed=True)
+        argv = server.task_argv(job, job.plan[0])
+        self.assertIn("%(playlist_index)s:%(track_number)s", argv)
+        self.assertIn("%(playlist_title)s:%(album)s", argv)
+
+    def test_cap_and_empty(self):
+        job = self.job(playlist=True)
+        with self.assertRaises(RuntimeError) as cm:
+            server.playlist_entries(job, self.entries(server.MAX_PLAYLIST_ITEMS + 1))
+        self.assertIn("above the", str(cm.exception))
+        with self.assertRaises(RuntimeError):
+            server.playlist_entries(job, {"entries": []})
+
+    def test_one_bad_item_leaves_the_rest(self):
+        job = self.plan(self.entries(3))
+        real = server.run_task
+
+        def fake(j, step):
+            if step.index == 2:
+                step.task.state = "failed"
+                step.task.error = "boom"
+                raise RuntimeError("boom")
+            step.task.state = "done"
+
+        server.run_task = fake
+        try:
+            server.run_plan(job)
+        finally:
+            server.run_task = real
+        self.assertEqual(job.state, "partial")
+        self.assertEqual([t.state for t in job.tasks], ["done", "failed", "done"])
+        self.assertIn("1 of 3", job.error)
+
+    def test_all_bad_items_fail_the_job(self):
+        job = self.plan(self.entries(2))
+
+        def fake(j, step):
+            raise RuntimeError("boom")
+
+        real, server.run_task = server.run_task, fake
+        try:
+            with self.assertRaises(RuntimeError):
+                server.run_plan(job)
+        finally:
+            server.run_task = real
+
+
 class ValidationTests(Base):
     def assertRejected(self, **kw):
         with self.assertRaises(ValueError):

@@ -1,4 +1,8 @@
 {
   "youtube": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
-  "archive_mp3": "https://archive.org/details/testmp3testfile"
+  "archive_mp3": "https://archive.org/details/testmp3testfile",
+  "playlist": "https://www.youtube.com/playlist?list=PL6IaIsEjSbf96XFRuNccS_RuEXwNdsoEu",
+  "playlist_item_url": "https://www.youtube.com/watch?v=BdvQkoF6Jq4&list=PL6IaIsEjSbf96XFRuNccS_RuEXwNdsoEu",
+  "playlist_title": "JODA15",
+  "playlist_count": 4
 }

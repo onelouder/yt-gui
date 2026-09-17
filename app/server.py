@@ -33,6 +33,8 @@ ATOMICPARSLEY = shutil.which("AtomicParsley") or shutil.which("atomicparsley")
 
 MAX_CONCURRENT = 3
 PROBE_TIMEOUT = 90
+MAX_PLAYLIST_ITEMS = 200
+ITEMS_RE = re.compile(r"^\d+(-\d+)?(,\d+(-\d+)?)*$")
 
 # Markers we ask yt-dlp to emit so stdout is machine-parseable.
 P = "@@P@@"
@@ -217,7 +219,7 @@ class Task:
 
 class Job:
     def __init__(self, url, mode, quality, audio_format, audio_quality, outdir: Path,
-                 keep_original=False, embed=False):
+                 keep_original=False, embed=False, playlist=False, items="", skip_existing=False):
         self.id = uuid.uuid4().hex[:12]
         self.url = url
         self.mode = mode
@@ -226,6 +228,11 @@ class Job:
         self.audio_quality = audio_quality
         self.keep_original = keep_original
         self.embed = embed
+        self.playlist = playlist
+        self.items = items
+        self.skip_existing = skip_existing
+        self.playlist_title = None
+        self.playlist_count = None
         self.outdir = str(outdir)
         self.title = None
         self.state = "queued"
@@ -269,6 +276,11 @@ class Job:
                            + (" + tags" if self.embed else ""),
             "keep_original": self.keep_original,
             "embed": self.embed,
+            "playlist": self.playlist,
+            "items": self.items,
+            "skip_existing": self.skip_existing,
+            "playlist_title": self.playlist_title,
+            "playlist_count": self.playlist_count,
             "outdir": self.outdir,
             "title": self.title,
             "state": self.state,
@@ -325,7 +337,6 @@ def fmt_for(mode: str, quality: str, part: str) -> str:
 def base_argv() -> list[str]:
     return [
         YTDLP,
-        "--no-playlist",
         "--no-color",
         "--newline",
         "--progress",
@@ -339,8 +350,12 @@ def base_argv() -> list[str]:
     ]
 
 
-def probe(job: Job) -> dict:
-    argv = [YTDLP, "-J", "--no-playlist", "--no-warnings", "--", job.url]
+def probe(job: Job, flat: bool = False) -> dict:
+    argv = [YTDLP, "-J", "--no-warnings"]
+    argv += ["--flat-playlist", "--yes-playlist"] if flat else ["--no-playlist"]
+    if flat and job.items:
+        argv += ["-I", job.items]
+    argv += ["--", job.url]
     try:
         proc = subprocess.run(
             argv, capture_output=True, text=True, timeout=PROBE_TIMEOUT,
@@ -426,10 +441,15 @@ class Step:
     audio: AudioFormat | None = None  # set when this step converts audio
     audio_quality: str = "best"
     keep_original: bool = False
+    index: int | None = None  # playlist position this step downloads
+    archive: str | None = None
 
 
 def task_argv(job: Job, step: Step) -> list[str]:
-    return base_argv() + step.extra + [
+    where = ["--yes-playlist", "-I", str(step.index)] if step.index else ["--no-playlist"]
+    if step.archive:
+        where += ["--download-archive", step.archive]
+    return base_argv() + where + step.extra + [
         "-f", step.fmt,
         "-P", job.outdir,
         "-o", step.outtmpl,
@@ -504,6 +524,13 @@ def run_task(job: Job, step: Step) -> None:
         task.error = msg
         bump()
         raise RuntimeError(msg)
+
+    if step.archive and not task.filepath:
+        # yt-dlp exited 0 without producing a file: the archive already had this id
+        task.state = "skipped"
+        task.notes.append("Already downloaded earlier (recorded in the archive file).")
+        bump()
+        return
 
     task.state = "done"
     task.files = collect_files(step, task)
@@ -606,9 +633,12 @@ def art_ok(fmt: AudioFormat, mutagen: bool, atomicparsley: bool) -> bool:
 
 
 def embed_argv(fmt: AudioFormat, mutagen: bool, atomicparsley: bool = False,
-               keep_original: bool = False) -> tuple[list[str], str | None]:
+               keep_original: bool = False, playlist: bool = False) -> tuple[list[str], str | None]:
     """Tags always; cover art only where yt-dlp can embed it without failing the job."""
     argv = ["--embed-metadata"]
+    if playlist:  # a playlist is an album: number the tracks
+        argv += ["--parse-metadata", "%(playlist_index)s:%(track_number)s",
+                 "--parse-metadata", "%(playlist_title)s:%(album)s"]
     if art_ok(fmt, mutagen, atomicparsley):
         argv.append("--embed-thumbnail")
         # -k also keeps the pre-conversion thumbnail; without --convert-thumbnails yt-dlp
@@ -623,41 +653,148 @@ def embed_argv(fmt: AudioFormat, mutagen: bool, atomicparsley: bool = False,
     return argv, f"{fmt.label} files can't hold cover art; embedded tags only."
 
 
-def audio_step(job: Job) -> Step:
+def audio_step(job: Job, stem: str = None, index: int = None, label: str = "") -> Step:
+    stem = stem or STEM
     fmt = AUDIO_FORMATS[job.audio_format]
-    embed, embed_note = (embed_argv(fmt, has_mutagen(), bool(ATOMICPARSLEY), job.keep_original)
+    embed, embed_note = (embed_argv(fmt, has_mutagen(), bool(ATOMICPARSLEY), job.keep_original,
+                                    job.playlist and index is not None)
                          if job.embed else ([], None))
     if not fmt.codec:
-        t = Task("audio", "Audio")
-        step = Step(t, AUDIO_SELECTOR, f"{STEM}.audio.%(ext)s", embed)
+        t = Task(task_key("audio", index), label or "Audio")
+        step = Step(t, AUDIO_SELECTOR, f"{stem}.audio.%(ext)s", embed)
     else:
-        t = Task("audio", f"Audio \u2192 {audio_label(fmt.key, job.audio_quality)}")
+        t = Task(task_key("audio", index), label or f"Audio \u2192 {audio_label(fmt.key, job.audio_quality)}")
         # -x picks the final extension itself, so %(ext)s ends up .mp3/.wav.
         # Any file with an audio track will do; ffmpeg drops the video.
         extra = extract_argv(fmt, job.audio_quality) + (["-k"] if job.keep_original else []) + embed
-        step = Step(t, f"{AUDIO_SELECTOR}/best", f"{STEM}.audio.%(ext)s",
+        step = Step(t, f"{AUDIO_SELECTOR}/best", f"{stem}.audio.%(ext)s",
                     extra, fmt, job.audio_quality, job.keep_original)
     if embed_note:
         t.notes.append(embed_note)
+    return with_playlist(job, step, index, f"audio-{job.audio_format}")
+
+
+def video_step(job: Job, stem: str = None, index: int = None, label: str = "") -> Step:
+    t = Task(task_key("video", index), label or "Video (no audio)")
+    step = Step(t, fmt_for(job.mode, job.quality, "video"), f"{stem or STEM}.video.%(ext)s")
+    return with_playlist(job, step, index, "video")
+
+
+def task_key(kind: str, index: int | None) -> str:
+    return kind if index is None else f"{index}:{kind}"
+
+
+def with_playlist(job: Job, step: Step, index: int | None, archive_kind: str) -> Step:
+    """Tag a step with its playlist position and, optionally, an archive file."""
+    step.index = index
+    if index is not None and job.skip_existing:
+        # one archive per output kind, so Separate mode and a re-run in another
+        # format are not skipped by an entry another kind recorded
+        step.archive = str(Path(job.outdir) / f".yt-gui-archive-{archive_kind}.txt")
     return step
 
 
-def video_step(job: Job) -> Step:
-    t = Task("video", "Video (no audio)")
-    return Step(t, fmt_for(job.mode, job.quality, "video"), f"{STEM}.video.%(ext)s")
-
-
-def build_plan(job: Job) -> list[Step]:
+def build_plan(job: Job, stem: str = None, index: int = None, label: str = "") -> list[Step]:
     """One Step per file to produce."""
+    stem = stem or STEM
+    sep = " \u00b7 " if label else ""
     if job.mode == "merged":
-        t = Task("merged", "Video + audio")
-        return [Step(t, fmt_for(job.mode, job.quality, "merged"), f"{STEM}.%(ext)s")]
+        t = Task(task_key("merged", index), label or "Video + audio")
+        return [with_playlist(job, Step(t, fmt_for(job.mode, job.quality, "merged"), f"{stem}.%(ext)s"),
+                              index, "merged")]
     if job.mode == "audio":
-        return [audio_step(job)]
+        return [audio_step(job, stem, index, label)]
     if job.mode == "video":
-        return [video_step(job)]
+        return [video_step(job, stem, index, label)]
     # separate: two independent runs, never combined, so yt-dlp cannot merge them
-    return [video_step(job), audio_step(job)]
+    return [video_step(job, stem, index, f"{label}{sep}Video" if label else ""),
+            audio_step(job, stem, index, f"{label}{sep}Audio" if label else "")]
+
+
+PLAYLIST_STEM = "%(playlist_title)s/%(playlist_index)03d - " + STEM
+
+
+def playlist_plan(job: Job, entries: list[tuple[int, dict]]) -> list[Step]:
+    """Plan every selected playlist entry as its own yt-dlp run."""
+    steps = []
+    for index, entry in entries:
+        title = entry.get("title") or entry.get("id") or f"item {index}"
+        steps += build_plan(job, PLAYLIST_STEM, index, f"{index:03d} \u00b7 {title}")
+    return steps
+
+
+def playlist_entries(job: Job, info: dict) -> list[tuple[int, dict]]:
+    entries = [e for e in (info.get("entries") or []) if e]
+    if not entries:
+        raise RuntimeError("That playlist has no downloadable entries.")
+    # flat entries carry no playlist_index, but the playlist reports which it selected
+    indices = info.get("requested_entries") or list(range(1, len(entries) + 1))
+    if len(indices) != len(entries):
+        indices = list(range(1, len(entries) + 1))
+    if len(entries) > MAX_PLAYLIST_ITEMS:
+        raise RuntimeError(
+            f"That playlist has {len(entries)} items, above the {MAX_PLAYLIST_ITEMS} limit. "
+            f"Use the Items field to pick a range, e.g. 1-{MAX_PLAYLIST_ITEMS}."
+        )
+    return list(zip(indices, entries))
+
+
+def prepare(job: Job) -> None:
+    """Probe the URL and, for a playlist, turn its entries into the plan."""
+    info = probe(job, flat=job.playlist)
+    is_playlist = info.get("_type") == "playlist"
+
+    if job.playlist and not is_playlist:
+        job.playlist = False  # a single video URL: nothing to enumerate
+        set_plan(job, build_plan(job))
+    if not job.playlist:
+        if is_playlist:
+            raise RuntimeError(
+                "That URL resolves to a playlist. Tick \"Download whole playlist\" to "
+                "fetch every item, or use the URL of a single video."
+            )
+        job.title = info.get("title") or info.get("id")
+        check_formats(info, job)
+        return
+
+    entries = playlist_entries(job, info)
+    job.title = job.playlist_title = info.get("title") or info.get("id")
+    job.playlist_count = info.get("playlist_count") or len(entries)
+    set_plan(job, playlist_plan(job, entries))
+
+
+def run_plan(job: Job) -> None:
+    """Run every step; for playlists, one bad item does not stop the rest."""
+    by_item: dict[int | None, list[Step]] = {}
+    for step in job.plan:
+        by_item.setdefault(step.index, []).append(step)
+
+    failures = 0
+    for steps in by_item.values():
+        if job.cancelled:
+            raise Cancelled()
+        try:
+            for step in steps:
+                if job.cancelled:
+                    raise Cancelled()
+                run_task(job, step)
+        except Cancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001 - recorded on the task, shown in the UI
+            if not job.playlist:
+                raise
+            failures += 1
+            for step in steps:
+                if step.task.state in ACTIVE_TASK_STATES:
+                    step.task.state = "failed" if step.task.error else "skipped"
+                    step.task.error = step.task.error or str(exc)
+            bump()
+
+    if failures and failures == len(by_item):
+        raise RuntimeError(f"Every one of the {failures} playlist items failed.")
+    job.state = "partial" if failures else "done"
+    if failures:
+        job.error = f"{failures} of {len(by_item)} playlist items failed; the rest finished."
 
 
 def run_job(job: Job) -> None:
@@ -669,29 +806,14 @@ def run_job(job: Job) -> None:
         try:
             job.state = "probing formats"
             bump()
-            info = probe(job)
-            if info.get("_type") == "playlist":
-                entries = info.get("entries") or []
-                if not entries:
-                    raise RuntimeError("That URL is a playlist with no entries; v1 handles single videos.")
-                raise RuntimeError(
-                    "That URL resolves to a playlist. v1 supports single videos only — "
-                    "use the URL of one item."
-                )
-            job.title = info.get("title") or info.get("id")
-            check_formats(info, job)
+            prepare(job)
 
             if job.cancelled:
                 raise Cancelled()
 
             job.state = "downloading"
             bump()
-            for step in job.plan:
-                if job.cancelled:
-                    raise Cancelled()
-                run_task(job, step)
-
-            job.state = "done"
+            run_plan(job)
         except Cancelled:
             job.state = "cancelled"
             job.error = "Cancelled by user."
@@ -710,6 +832,11 @@ def run_job(job: Job) -> None:
             bump()
 
 
+def set_plan(job: Job, plan: list[Step]) -> None:
+    job.plan = plan
+    job.tasks = [step.task for step in plan]
+
+
 def new_job(data: dict) -> Job:
     """Validate a POST /api/jobs body and build the job (not yet started)."""
     url = str(data.get("url") or "").strip()
@@ -719,6 +846,9 @@ def new_job(data: dict) -> Job:
     audio_quality = str(data.get("audio_quality") or "best")
     keep_original = data.get("keep_original", False)
     embed = data.get("embed", False)
+    playlist = data.get("playlist", False)
+    items = str(data.get("items") or "").strip()
+    skip_existing = data.get("skip_existing", False)
     outdir_raw = str(data.get("outdir") or "")
 
     if not url:
@@ -742,6 +872,13 @@ def new_job(data: dict) -> Job:
         raise ValueError("keep_original must be true or false.")
     if not isinstance(embed, bool):
         raise ValueError("embed must be true or false.")
+    for name, value in (("playlist", playlist), ("skip_existing", skip_existing)):
+        if not isinstance(value, bool):
+            raise ValueError(f"{name} must be true or false.")
+    if items and not ITEMS_RE.match(items):
+        raise ValueError("Items must look like 1-10, or 1,4,7-9.")
+    if not playlist:
+        items, skip_existing = "", False
     if not AUDIO_FORMATS[audio_format].bitrate_ok:
         audio_quality = "best"  # lossless or untouched: a bitrate means nothing
     if not AUDIO_FORMATS[audio_format].codec:
@@ -756,9 +893,10 @@ def new_job(data: dict) -> Job:
         )
 
     outdir = validate_outdir(outdir_raw or str(DEFAULT_OUTDIR))
-    job = Job(url, mode, quality, audio_format, audio_quality, outdir, keep_original, embed)
-    job.plan = build_plan(job)
-    job.tasks = [step.task for step in job.plan]
+    job = Job(url, mode, quality, audio_format, audio_quality, outdir, keep_original, embed,
+              playlist, items, skip_existing)
+    # a playlist's real plan needs the probe first; until then the job has no tasks
+    set_plan(job, [] if job.playlist else build_plan(job))
     return job
 
 
@@ -923,6 +1061,7 @@ def config_payload():
         "default_outdir": str(DEFAULT_OUTDIR),
         "allowed_root": str(ALLOWED_ROOT),
         "max_concurrent": MAX_CONCURRENT,
+        "max_playlist_items": MAX_PLAYLIST_ITEMS,
         "modes": [{"key": k, "label": v} for k, v in MODE_LABELS.items()],
         "qualities": list(QUALITIES),
         "audio_formats": [
@@ -970,7 +1109,7 @@ def ytdlp_version():
 
 
 def main():
-    global DEFAULT_OUTDIR, ALLOWED_ROOT, MAX_CONCURRENT, SLOTS
+    global DEFAULT_OUTDIR, ALLOWED_ROOT, MAX_CONCURRENT, SLOTS, MAX_PLAYLIST_ITEMS
 
     ap = argparse.ArgumentParser(description="Local web GUI for yt-dlp")
     ap.add_argument("--port", type=int, default=8723)
@@ -978,6 +1117,7 @@ def main():
     ap.add_argument("--outdir", default=str(DEFAULT_OUTDIR), help="default download directory")
     ap.add_argument("--root", default=str(ALLOWED_ROOT), help="allowed root for output paths")
     ap.add_argument("--max-concurrent", type=int, default=MAX_CONCURRENT)
+    ap.add_argument("--max-playlist-items", type=int, default=MAX_PLAYLIST_ITEMS)
     args = ap.parse_args()
 
     if not YTDLP:
@@ -986,6 +1126,7 @@ def main():
     ALLOWED_ROOT = Path(os.path.expanduser(args.root)).resolve()
     DEFAULT_OUTDIR = Path(os.path.expanduser(args.outdir)).resolve()
     MAX_CONCURRENT = max(1, args.max_concurrent)
+    MAX_PLAYLIST_ITEMS = max(1, args.max_playlist_items)
     SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT)
 
     try:
