@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>yt-dlp downloader</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>yt-dlp downloader</h1>
+  <div class="chips" id="chips"></div>
+</header>
+
+<main>
+  <form id="job-form" class="card form" autocomplete="off">
+    <label class="field url-field">
+      <span class="label">URL</span>
+      <input id="url" name="url" type="url" placeholder="https://…" required spellcheck="false">
+    </label>
+
+    <fieldset class="field">
+      <legend class="label">Mode</legend>
+      <div class="segmented" id="mode-group">
+        <label><input type="radio" name="mode" value="merged" checked><span>Merged</span></label>
+        <label><input type="radio" name="mode" value="separate"><span>Separate</span></label>
+        <label><input type="radio" name="mode" value="audio"><span>Audio only</span></label>
+        <label><input type="radio" name="mode" value="video"><span>Video only</span></label>
+      </div>
+      <p class="hint" id="mode-hint"></p>
+    </fieldset>
+
+    <div class="row">
+      <label class="field">
+        <span class="label">Quality</span>
+        <select id="quality" name="quality">
+          <option value="best">Best available</option>
+          <option value="1080">1080p or lower</option>
+          <option value="720">720p or lower</option>
+          <option value="480">480p or lower</option>
+        </select>
+      </label>
+
+      <label class="field">
+        <span class="label">Audio format</span>
+        <select id="audio-format" name="audio_format">
+          <option value="native">Original (no re-encode)</option>
+          <option value="mp3">MP3 (VBR ~245 kbps)</option>
+          <option value="wav">WAV (uncompressed)</option>
+        </select>
+      </label>
+
+      <label class="field grow">
+        <span class="label">Output folder</span>
+        <div class="path-row">
+          <input id="outdir" name="outdir" type="text" spellcheck="false" placeholder="/home/you/downloads">
+          <button type="button" id="reset-path" class="ghost" title="Reset to default">default</button>
+        </div>
+      </label>
+    </div>
+
+    <div class="actions">
+      <button type="submit" id="submit" class="primary">Download</button>
+      <p class="hint" id="form-hint"></p>
+    </div>
+    <p class="error" id="form-error" hidden></p>
+  </form>
+
+  <section class="jobs">
+    <h2>Jobs <span class="muted" id="job-count"></span></h2>
+    <div id="job-list"></div>
+    <p class="empty" id="empty">No jobs yet. Paste a URL above.</p>
+  </section>
+</main>
+
+<footer>
+  <span id="footer-note"></span>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>

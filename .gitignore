@@ -1,0 +1,18 @@
+# downloaded media
+downloads/
+*.mp4
+*.m4a
+*.webm
+*.mkv
+*.mp3
+*.wav
+*.flac
+*.opus
+*.part
+*.ytdl
+
+# local tooling
+.venv/
+yt-dlp/
+__pycache__/
+*.pyc
