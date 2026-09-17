@@ -31,6 +31,8 @@ const AUDIO_HINTS = {
   wav: 'Decoded to uncompressed 16-bit WAV with ffmpeg — about 10 MB per minute.',
 };
 
+const ACTIVE_TASK = ['queued', 'downloading', 'merging', 'converting', 'tagging', 'embedding art'];
+
 const audioFormat = (key) => config?.audio_formats?.find((f) => f.key === key);
 
 // --------------------------------------------------------------------- utils
@@ -69,6 +71,8 @@ async function loadConfig() {
   chips.replaceChildren();
   chips.append(el('span', 'chip', `yt-dlp ${config.ytdlp_version || '?'}`));
   chips.append(el('span', `chip${config.ffmpeg ? '' : ' bad'}`, config.ffmpeg ? 'ffmpeg ok' : 'ffmpeg missing'));
+  chips.append(el('span', `chip${config.mutagen ? '' : ' warn'}`, config.mutagen ? 'mutagen ok' : 'no mutagen'));
+  chips.lastChild.title = config.mutagen ? 'Cover art can be embedded in Opus and FLAC.' : 'Opus/FLAC get tags but no cover art until mutagen is installed for yt-dlp.';
   chips.append(el('span', 'chip', `max ${config.max_concurrent} concurrent`));
 
   if (!$('outdir').value) $('outdir').value = config.default_outdir;
@@ -112,10 +116,16 @@ function syncMode() {
   $('audio-format').disabled = !hasAudioFile;
   $('audio-quality').disabled = !hasAudioFile || !fmt?.bitrate_ok;
   $('keep-original').disabled = !hasAudioFile || !fmt?.convert;
+  $('embed').disabled = !hasAudioFile || !config?.ffmpeg;
   const best = $('audio-quality').querySelector('option[value=best]');
   if (best) best.textContent = fmt?.best_label || 'Best';
   let audioHint = hasAudioFile ? (AUDIO_HINTS[fmt?.key] || '') : 'Audio format applies to Audio only and Separate modes.';
   if (hasAudioFile && config && !(config.ffmpeg && config.ffprobe)) audioHint += ' Conversion needs ffmpeg and ffprobe on PATH.';
+  if (hasAudioFile && $('embed').checked && fmt && !fmt.art) {
+    audioHint += fmt.key === 'native' ? ' Cover art is only embedded when converting — tags only.'
+      : ['opus', 'flac', 'm4a'].includes(fmt.key) ? ` ${fmt.label} cover art needs mutagen for yt-dlp${fmt.key === 'm4a' ? ' (or AtomicParsley)' : ''} — tags only.`
+      : ` ${fmt.label} can't hold cover art — tags only.`;
+  }
   $('audio-hint').textContent = audioHint;
   $('quality').disabled = mode === 'audio';
 }
@@ -141,7 +151,7 @@ function renderTask(task) {
   const fill = el('div', `fill ${task.state}`);
   const pct = task.state === 'done' ? 100 : task.percent;
   if (pct === null || pct === undefined) {
-    if (['downloading', 'merging', 'converting'].includes(task.state)) fill.classList.add('indeterminate');
+    if (task.state !== 'queued' && ACTIVE_TASK.includes(task.state)) fill.classList.add('indeterminate');
   } else {
     fill.style.width = `${pct}%`;
   }
@@ -177,7 +187,7 @@ function renderJob(job) {
   if (job.error) card.append(el('p', 'error', job.error));
 
   const foot = el('div', 'job-foot');
-  const active = ['queued', 'probing formats', 'downloading', 'merging', 'converting'].includes(job.state);
+  const active = ['queued', 'probing formats', 'downloading'].includes(job.state);
   if (active) {
     const btn = el('button', 'small', 'Cancel');
     btn.type = 'button';
@@ -196,6 +206,7 @@ function renderJob(job) {
     $('audio-format').value = job.audio_format || 'native';
     $('audio-quality').value = job.audio_quality || 'best';
     $('keep-original').checked = !!job.keep_original;
+    $('embed').checked = !!job.embed;
     $('outdir').value = job.outdir;
     syncMode();
     $('url').focus();
@@ -236,7 +247,7 @@ async function poll() {
 
 // --------------------------------------------------------------------- form
 form.addEventListener('change', (e) => {
-  if (['mode', 'audio_format'].includes(e.target.name)) syncMode();
+  if (['mode', 'audio_format', 'embed'].includes(e.target.name)) syncMode();
 });
 
 $('reset-path').addEventListener('click', () => {
@@ -258,6 +269,7 @@ form.addEventListener('submit', async (e) => {
     audio_format: $('audio-format').value,
     audio_quality: $('audio-quality').value,
     keep_original: !$('keep-original').disabled && $('keep-original').checked,
+    embed: !$('embed').disabled && $('embed').checked,
     outdir: $('outdir').value.trim(),
   };
 

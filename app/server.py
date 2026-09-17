@@ -29,6 +29,7 @@ STATIC = HERE / "static"
 YTDLP = shutil.which("yt-dlp")
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
+ATOMICPARSLEY = shutil.which("AtomicParsley") or shutil.which("atomicparsley")
 
 MAX_CONCURRENT = 3
 PROBE_TIMEOUT = 90
@@ -48,6 +49,15 @@ PROGRESS_TMPL = (
 POSTPROC_TMPL = "postprocess:" + PP + "%(progress.status)s|%(progress.postprocessor)s"
 
 MODES = ("merged", "separate", "audio", "video")
+
+# Task states while a yt-dlp process is alive, by postprocessor name.
+PP_STATES = {
+    "Merger": "merging",
+    "ExtractAudio": "converting",
+    "Metadata": "tagging",
+    "EmbedThumbnail": "embedding art",
+}
+ACTIVE_TASK_STATES = ("queued", "downloading", *dict.fromkeys(PP_STATES.values()))
 QUALITIES = {"best": None, "1080": 1080, "720": 720, "480": 480}
 
 @dataclass(frozen=True)
@@ -59,6 +69,7 @@ class AudioFormat:
     lossless: bool = False
     best: str | None = None  # --audio-quality for "best"; None = let the encoder decide
     best_label: str = "Best"
+    art: str | None = None   # what yt-dlp needs to embed cover art: "ffmpeg", "mutagen", "mp4tagger", None
 
     @property
     def bitrate_ok(self) -> bool:
@@ -69,12 +80,14 @@ class AudioFormat:
 # ffmpeg via yt-dlp's -x (FFmpegExtractAudio).
 AUDIO_FORMATS = {f.key: f for f in (
     AudioFormat("native", "Original", None),
-    AudioFormat("mp3", "MP3", "mp3", "mp3", best="0", best_label="Best (VBR ~245 kbps)"),
+    AudioFormat("mp3", "MP3", "mp3", "mp3", best="0", best_label="Best (VBR ~245 kbps)", art="ffmpeg"),
     # ffmpeg's native AAC VBR mode is weak, and yt-dlp maps VBR numbers to nothing
     # for libopus, so "best" means a fixed high bitrate for these two.
-    AudioFormat("m4a", "M4A", "m4a", "aac", best="256K", best_label="Best (256 kbps AAC)"),
-    AudioFormat("opus", "Opus", "opus", "opus", best="160K", best_label="Best (160 kbps)"),
-    AudioFormat("flac", "FLAC", "flac", "flac", lossless=True),
+    # m4a art: yt-dlp tries mutagen, then AtomicParsley, then ffmpeg -- but ffmpeg 9 writes
+    # .m4a with the ipod muxer, which rejects JPEG covers, so that last fallback fails.
+    AudioFormat("m4a", "M4A", "m4a", "aac", best="256K", best_label="Best (256 kbps AAC)", art="mp4tagger"),
+    AudioFormat("opus", "Opus", "opus", "opus", best="160K", best_label="Best (160 kbps)", art="mutagen"),
+    AudioFormat("flac", "FLAC", "flac", "flac", lossless=True, art="mutagen"),
     AudioFormat("wav", "WAV", "wav", lossless=True),
 )}
 
@@ -157,10 +170,9 @@ def _num(tok: str):
 class Task:
     """One yt-dlp invocation inside a job (one output file)."""
 
-    def __init__(self, key: str, label: str, pp_state: str = "merging"):
+    def __init__(self, key: str, label: str):
         self.key = key
         self.label = label
-        self.pp_state = pp_state  # state shown while yt-dlp postprocesses
         self.state = "queued"
         self.downloaded = 0
         self.total = None
@@ -205,7 +217,7 @@ class Task:
 
 class Job:
     def __init__(self, url, mode, quality, audio_format, audio_quality, outdir: Path,
-                 keep_original=False):
+                 keep_original=False, embed=False):
         self.id = uuid.uuid4().hex[:12]
         self.url = url
         self.mode = mode
@@ -213,6 +225,7 @@ class Job:
         self.audio_format = audio_format
         self.audio_quality = audio_quality
         self.keep_original = keep_original
+        self.embed = embed
         self.outdir = str(outdir)
         self.title = None
         self.state = "queued"
@@ -252,8 +265,10 @@ class Job:
             "audio_format_label": AUDIO_FORMATS[self.audio_format].label,
             "audio_quality": self.audio_quality,
             "audio_label": audio_label(self.audio_format, self.audio_quality)
-                           + (" + original" if self.keep_original else ""),
+                           + (" + original" if self.keep_original else "")
+                           + (" + tags" if self.embed else ""),
             "keep_original": self.keep_original,
+            "embed": self.embed,
             "outdir": self.outdir,
             "title": self.title,
             "state": self.state,
@@ -383,7 +398,8 @@ HINTS = (
     ("not available in your country", "Geo-blocked — a VPN in a permitted region is usually needed."),
     ("blocked it in your country", "Geo-blocked — a VPN in a permitted region is usually needed."),
     ("private video", "This video is private; cookies from an account with access are required."),
-    ("ffprobe", "Audio conversion needs ffprobe (ships with ffmpeg) on PATH."),
+    ("unable to embed", "Cover art could not be embedded — untick \"Embed cover art & tags\" or install mutagen for yt-dlp."),
+    ("ffprobe and ffmpeg not found", "Audio conversion needs ffmpeg and ffprobe on PATH."),
     ("ffmpeg", "ffmpeg is required for this operation but was not usable."),
     ("unsupported url", "yt-dlp has no extractor for this URL."),
     ("requested format is not available",
@@ -457,8 +473,9 @@ def run_task(job: Job, step: Step) -> None:
                 parse_progress(task, line[len(P):])
             elif line.startswith(PP):
                 status = line[len(PP):].split("|")[0]
-                if status in ("started", "processing"):
-                    task.state = task.pp_state
+                name = line[len(PP):].split("|")[1] if "|" in line else ""
+                if status in ("started", "processing") and name in PP_STATES:
+                    task.state = PP_STATES[name]
                 bump()
             elif line.startswith(SRC):
                 acodec, _, ext = line[len(SRC):].partition("|")
@@ -582,16 +599,47 @@ def source_note(step: Step, acodec: str, ext: str) -> str | None:
     return msg + " (bitrate not applied)." if step.audio_quality != "best" else msg + "."
 
 
+def art_ok(fmt: AudioFormat, mutagen: bool, atomicparsley: bool) -> bool:
+    return (fmt.art == "ffmpeg"
+            or (fmt.art == "mutagen" and mutagen)
+            or (fmt.art == "mp4tagger" and (mutagen or atomicparsley)))
+
+
+def embed_argv(fmt: AudioFormat, mutagen: bool, atomicparsley: bool = False,
+               keep_original: bool = False) -> tuple[list[str], str | None]:
+    """Tags always; cover art only where yt-dlp can embed it without failing the job."""
+    argv = ["--embed-metadata"]
+    if art_ok(fmt, mutagen, atomicparsley):
+        argv.append("--embed-thumbnail")
+        # -k also keeps the pre-conversion thumbnail; without --convert-thumbnails yt-dlp
+        # converts to PNG internally and cleans up (bigger cover, no stray .webp)
+        return argv + ([] if keep_original else ["--convert-thumbnails", "jpg"]), None
+    if fmt.art in ("mutagen", "mp4tagger"):
+        extra = " or AtomicParsley" if fmt.art == "mp4tagger" else ""
+        return argv, (f"Cover art for {fmt.label} needs the mutagen Python module in yt-dlp's "
+                      f"install (e.g. `pacman -S python-mutagen`){extra}; embedded tags only.")
+    if fmt.codec is None:
+        return argv, "Cover art is only embedded when converting; embedded tags only."
+    return argv, f"{fmt.label} files can't hold cover art; embedded tags only."
+
+
 def audio_step(job: Job) -> Step:
     fmt = AUDIO_FORMATS[job.audio_format]
-    if fmt.codec:
-        t = Task("audio", f"Audio \u2192 {audio_label(fmt.key, job.audio_quality)}", "converting")
+    embed, embed_note = (embed_argv(fmt, has_mutagen(), bool(ATOMICPARSLEY), job.keep_original)
+                         if job.embed else ([], None))
+    if not fmt.codec:
+        t = Task("audio", "Audio")
+        step = Step(t, AUDIO_SELECTOR, f"{STEM}.audio.%(ext)s", embed)
+    else:
+        t = Task("audio", f"Audio \u2192 {audio_label(fmt.key, job.audio_quality)}")
         # -x picks the final extension itself, so %(ext)s ends up .mp3/.wav.
         # Any file with an audio track will do; ffmpeg drops the video.
-        extra = extract_argv(fmt, job.audio_quality) + (["-k"] if job.keep_original else [])
-        return Step(t, f"{AUDIO_SELECTOR}/best", f"{STEM}.audio.%(ext)s",
+        extra = extract_argv(fmt, job.audio_quality) + (["-k"] if job.keep_original else []) + embed
+        step = Step(t, f"{AUDIO_SELECTOR}/best", f"{STEM}.audio.%(ext)s",
                     extra, fmt, job.audio_quality, job.keep_original)
-    return Step(Task("audio", "Audio"), AUDIO_SELECTOR, f"{STEM}.audio.%(ext)s")
+    if embed_note:
+        t.notes.append(embed_note)
+    return step
 
 
 def video_step(job: Job) -> Step:
@@ -648,7 +696,7 @@ def run_job(job: Job) -> None:
             job.state = "cancelled"
             job.error = "Cancelled by user."
             for t in job.tasks:
-                if t.state in ("queued", "downloading", "merging", "converting"):
+                if t.state in ACTIVE_TASK_STATES:
                     t.state = "cancelled"
         except Exception as exc:  # noqa: BLE001 - surfaced to the UI
             job.state = "failed"
@@ -656,7 +704,7 @@ def run_job(job: Job) -> None:
             hint = hint_for(msg)
             job.error = msg + (f"\n\nHint: {hint}" if hint else "")
             for t in job.tasks:
-                if t.state in ("queued", "downloading", "merging", "converting"):
+                if t.state in ACTIVE_TASK_STATES:
                     t.state = "failed" if t.error else "skipped"
         finally:
             bump()
@@ -670,6 +718,7 @@ def new_job(data: dict) -> Job:
     audio_format = str(data.get("audio_format") or "native")
     audio_quality = str(data.get("audio_quality") or "best")
     keep_original = data.get("keep_original", False)
+    embed = data.get("embed", False)
     outdir_raw = str(data.get("outdir") or "")
 
     if not url:
@@ -691,17 +740,23 @@ def new_job(data: dict) -> Job:
         audio_format = "native"  # only audio outputs are converted
     if not isinstance(keep_original, bool):
         raise ValueError("keep_original must be true or false.")
+    if not isinstance(embed, bool):
+        raise ValueError("embed must be true or false.")
     if not AUDIO_FORMATS[audio_format].bitrate_ok:
         audio_quality = "best"  # lossless or untouched: a bitrate means nothing
     if not AUDIO_FORMATS[audio_format].codec:
         keep_original = False  # nothing is converted, so the download is the original
+    if mode not in ("audio", "separate"):
+        embed = False  # tagging is for audio files
+    if embed and not FFMPEG:
+        raise ValueError("Embedding tags needs ffmpeg on PATH.")
     if AUDIO_FORMATS[audio_format].codec and not (FFMPEG and FFPROBE):
         raise ValueError(
             f"Converting to {AUDIO_FORMATS[audio_format].label} needs ffmpeg and ffprobe on PATH."
         )
 
     outdir = validate_outdir(outdir_raw or str(DEFAULT_OUTDIR))
-    job = Job(url, mode, quality, audio_format, audio_quality, outdir, keep_original)
+    job = Job(url, mode, quality, audio_format, audio_quality, outdir, keep_original, embed)
     job.plan = build_plan(job)
     job.tasks = [step.task for step in job.plan]
     return job
@@ -862,6 +917,7 @@ def config_payload():
         "ffmpeg": bool(FFMPEG),
         "ffmpeg_path": FFMPEG,
         "ffprobe": bool(FFPROBE),
+        "mutagen": has_mutagen(),
         "ytdlp_path": YTDLP,
         "ytdlp_version": ytdlp_version(),
         "default_outdir": str(DEFAULT_OUTDIR),
@@ -871,7 +927,8 @@ def config_payload():
         "qualities": list(QUALITIES),
         "audio_formats": [
             {"key": f.key, "label": f.label, "convert": f.codec is not None,
-             "lossless": f.lossless, "bitrate_ok": f.bitrate_ok, "best_label": f.best_label}
+             "lossless": f.lossless, "bitrate_ok": f.bitrate_ok, "best_label": f.best_label,
+             "art": art_ok(f, has_mutagen(), bool(ATOMICPARSLEY))}
             for f in AUDIO_FORMATS.values()
         ],
         "audio_qualities": [{"key": k, "label": v} for k, v in AUDIO_QUALITY_LABELS.items()],
@@ -879,6 +936,24 @@ def config_payload():
 
 
 _VERSION_CACHE = []
+MUTAGEN: bool | None = None  # None = not yet detected
+
+
+def has_mutagen() -> bool:
+    """Whether yt-dlp's own Python can import mutagen (needed for Opus/FLAC cover art)."""
+    global MUTAGEN
+    if MUTAGEN is None:
+        MUTAGEN = False
+        if YTDLP:
+            try:
+                # the verbose header lists optional libraries; "x" then fails fast as a bad URL
+                out = subprocess.run([YTDLP, "-v", "--ignore-config", "x"],
+                                     capture_output=True, text=True, timeout=30)
+                libs = next((ln for ln in out.stderr.splitlines() if "Optional libraries:" in ln), "")
+                MUTAGEN = "mutagen" in libs
+            except (OSError, subprocess.SubprocessError):
+                pass
+    return MUTAGEN
 
 
 def ytdlp_version():
@@ -925,6 +1000,7 @@ def main():
         f"yt-dlp GUI  \u2192  http://localhost:{args.port}",
         f"  yt-dlp    : {YTDLP} ({ytdlp_version()})",
         f"  ffmpeg    : {FFMPEG or 'NOT FOUND \u2014 merged mode disabled'}",
+        f"  mutagen   : {'yes' if has_mutagen() else 'no \u2014 no cover art for Opus/FLAC'}",
         f"  downloads : {DEFAULT_OUTDIR}",
         f"  allowed   : {ALLOWED_ROOT}",
         "  note      : no auth \u2014 any user on this machine can reach this port.",
@@ -935,7 +1011,7 @@ def main():
     except KeyboardInterrupt:
         print("\nshutting down")
         for job in list(JOBS.values()):
-            if job.state in ("queued", "probing formats", "downloading", "merging", "converting"):
+            if job.state in ("queued", "probing formats", "downloading"):
                 job.cancel()
         server.shutdown()
 

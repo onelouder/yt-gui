@@ -27,6 +27,8 @@ SERVER = HERE.parent / "server.py"
 FIX = json.loads((HERE / "fixtures.json").read_text())
 YT = FIX["youtube"]
 ARCHIVE = FIX["archive_mp3"]
+MUTAGEN = False    # set from /api/config at startup; decides Opus/FLAC cover expectations
+MP4TAGGER = False  # mutagen or AtomicParsley available: decides M4A cover expectations
 TERMINAL = {"done", "failed", "cancelled", "partial", "interrupted"}
 
 
@@ -93,6 +95,26 @@ SCENARIOS = [
       [{"streams": ["video:*"]}, {"ext": "flac", "streams": ["audio:flac"]}], files=3),
     S("archive-mp3-keep-nothing", {"url": ARCHIVE, "mode": "audio", "audio_format": "mp3", "keep_original": True},
       [{"ext": "mp3", "note": "no separate original"}], files=1),
+    # -- sprint 4: cover art + tags ------------------------------------------
+    S("mp3-embed", {"url": YT, "mode": "audio", "audio_format": "mp3", "embed": True},
+      [{"ext": "mp3", "streams": ["audio:mp3"], "cover": True, "tags": ["title", "artist"], "no_note": True,
+        "chapters": 3}],
+      files=1),
+    S("m4a-embed", {"url": YT, "mode": "audio", "audio_format": "m4a", "embed": True},
+      # the fixture video has 3 YouTube chapters; MP4 stores them as a text data track
+      [{"ext": "m4a", "streams": ["audio:aac", "data:bin_data"], "cover": "mp4tagger", "tags": ["title", "artist"],
+        "chapters": 3}], files=1),
+    S("wav-embed-tags-only", {"url": YT, "mode": "audio", "audio_format": "wav", "embed": True},
+      [{"ext": "wav", "cover": False, "tags": ["title", "artist"], "note": "can't hold cover art"}], files=1),
+    S("flac-embed", {"url": YT, "mode": "audio", "audio_format": "flac", "embed": True},
+      [{"ext": "flac", "cover": "mutagen", "tags": ["title", "artist"]}], files=1),
+    S("opus-embed", {"url": YT, "mode": "audio", "audio_format": "opus", "embed": True},
+      [{"ext": "opus", "cover": "mutagen", "tags": ["title", "artist"]}], files=1),
+    S("native-embed-tags-only", {"url": YT, "mode": "audio", "embed": True},
+      [{"cover": False, "tags": ["title"], "note": "only embedded when converting"}], files=1),
+    S("separate-mp3-keep-embed", {"url": YT, "mode": "separate", "quality": "480", "audio_format": "mp3",
+                                  "keep_original": True, "embed": True},
+      [{"streams": ["video:*"]}, {"ext": "mp3", "cover": True, "tags": ["title"]}], files=3),
     S("bad-bitrate-rejected", {"url": YT, "mode": "audio", "audio_format": "mp3", "audio_quality": "999"},
       [], http=400),
 ]
@@ -120,7 +142,8 @@ def api(port, method, path, body=None):
 
 
 def ffprobe(path: str) -> dict:
-    out = subprocess.run(["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", path],
+    out = subprocess.run(["ffprobe", "-v", "error", "-show_streams", "-show_format", "-show_chapters",
+                          "-of", "json", path],
                          capture_output=True, text=True)
     return json.loads(out.stdout or "{}")
 
@@ -168,8 +191,11 @@ def check_file(path: str, exp: dict) -> list[str]:
             errs.append(f"LAME header Xing={vbr} Info={cbr}, expected {'VBR' if exp['vbr'] else 'CBR'}")
     if "cover" in exp:
         has = any(is_cover(s) for s in streams)
-        if has != exp["cover"]:
-            errs.append(f"cover art present={has}, expected {exp['cover']}")
+        want = {"mutagen": MUTAGEN, "mp4tagger": MP4TAGGER}.get(exp["cover"], exp["cover"])
+        if has != want:
+            errs.append(f"cover art present={has}, expected {want}")
+    if "chapters" in exp and len(info.get("chapters") or []) != exp["chapters"]:
+        errs.append(f"{len(info.get('chapters') or [])} chapters != {exp['chapters']}")
     if "tags" in exp:
         tags = {k.lower(): v for k, v in ((info.get("format") or {}).get("tags") or {}).items()}
         for s in real:
@@ -247,7 +273,12 @@ def main():
                 time.sleep(0.2)
         else:
             sys.exit(f"server did not start; see {tmp / 'server.log'}")
+        global MUTAGEN
+        global MP4TAGGER
+        MUTAGEN = bool(cfg.get("mutagen"))
+        MP4TAGGER = next(f["art"] for f in cfg["audio_formats"] if f["key"] == "m4a")
         print(f"yt-dlp {cfg.get('ytdlp_version')} · ffmpeg {'yes' if cfg.get('ffmpeg') else 'no'} "
+              f"· mutagen {'yes' if MUTAGEN else 'no'} "
               f"· {len(chosen)} scenarios · {tmp}")
 
         started = {}

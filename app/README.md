@@ -64,8 +64,27 @@ e.g. `….audio.webm` + `….audio.mp3`. yt-dlp reports the pre-conversion path
 there's nothing separate to keep (the source already had the target codec and file
 type), the task says so.
 
-Without it, yt-dlp downloads the best audio stream, runs ffmpeg, and deletes the source file.
-The task shows `converting` while ffmpeg runs. Converting to MP3 from Opus/AAC is
+**Embed cover art & tags** (`--embed-metadata`, plus `--embed-thumbnail
+--convert-thumbnails jpg` where it works) writes title, artist, date, description
+and chapters, and the video thumbnail as cover art. yt-dlp *fails the job* when it can't
+embed art, so the server only asks for art where it will succeed:
+
+| Format | Cover art | Needs |
+|---|---|---|
+| MP3 | yes | ffmpeg |
+| M4A | yes | mutagen or AtomicParsley. yt-dlp's ffmpeg fallback breaks on ffmpeg 9, whose `ipod` muxer rejects JPEG covers |
+| Opus, FLAC | yes | mutagen, imported by yt-dlp's own Python (`pacman -S python-mutagen`) |
+| WAV | no | — tags only |
+| Original | no | — tags only (the native `.webm` can't hold art) |
+
+Where art isn't possible, the job still runs with tags only and the task says why. The
+server detects mutagen at startup from `yt-dlp -v`'s "Optional libraries" line; the
+top bar shows `mutagen ok` / `no mutagen`. With **Keep original** on, the thumbnail
+isn't pre-converted (yt-dlp's `-k` would keep the intermediate image), so the cover is
+PNG instead of JPEG.
+
+Without Keep original, yt-dlp downloads the best audio stream, runs ffmpeg, and deletes the source file.
+Task states while yt-dlp postprocesses: `merging`, `converting`, `tagging`, `embedding art`. Converting to MP3 from Opus/AAC is
 lossy-to-lossy; pick Original if you want the untouched stream.
 
 The PRD lists `audio-only: best audio` as a quality value; here that is the
@@ -77,7 +96,7 @@ Same result, one less way to express the same thing.
 | Method | Path | Notes |
 |---|---|---|
 | `GET` | `/api/config` | ffmpeg presence, yt-dlp version, default/allowed paths, concurrency cap |
-| `POST` | `/api/jobs` | `{url, mode, quality, audio_format, audio_quality, keep_original, outdir}` → job (`audio_format`: `native`/`mp3`/`m4a`/`opus`/`flac`/`wav`; `audio_quality`: `best`/`320`/`192`/`128`), or `400` with a readable `error` |
+| `POST` | `/api/jobs` | `{url, mode, quality, audio_format, audio_quality, keep_original, embed, outdir}` → job (`audio_format`: `native`/`mp3`/`m4a`/`opus`/`flac`/`wav`; `audio_quality`: `best`/`320`/`192`/`128`), or `400` with a readable `error` |
 | `GET` | `/api/jobs` | `{version, jobs: [...]}` newest first |
 | `GET` | `/api/jobs/{id}` | one job |
 | `POST` | `/api/jobs/{id}/cancel` | SIGTERMs the process group |

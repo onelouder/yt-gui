@@ -99,6 +99,23 @@ const CHECKS = [
     t.ok(files[0].textContent.startsWith('original: ') && files[0].textContent.endsWith('.webm'), 'original row: ' + files[0].textContent);
     t.ok(files[1].textContent.startsWith('converted: ') && files[1].textContent.endsWith('.mp3'), 'converted row: ' + files[1].textContent);
   `],
+  ['embed: checkbox, tags-only hints, mutagen chip', `
+    const cfg = await (await fetch('/api/config')).json();
+    t.ok([...document.querySelectorAll('#chips .chip')].some((c) => c.textContent === (cfg.mutagen ? 'mutagen ok' : 'no mutagen')), 'mutagen chip');
+    t.mode('video'); t.ok(t.$('embed').disabled, 'video disables embed');
+    t.mode('audio'); t.ok(!t.$('embed').disabled, 'audio enables embed');
+    t.set('embed', true);
+    t.set('audio-format', 'wav');  t.ok(t.$('audio-hint').textContent.includes("can't hold cover art"), 'wav hint');
+    t.set('audio-format', 'mp3');  t.ok(!t.$('audio-hint').textContent.includes('tags only'), 'mp3 has no tags-only hint');
+    t.set('audio-format', 'flac'); t.eq(t.$('audio-hint').textContent.includes('needs mutagen'), !cfg.mutagen, 'flac mutagen hint');
+    t.set('embed', false); t.ok(!t.$('audio-hint').textContent.includes('tags only'), 'hint clears when unticked');
+  `],
+  ['embed: live MP3 shows tagging steps and finishes with + tags label', `
+    const job = await t.post({ url: 'https://www.youtube.com/watch?v=jNQXAC9IVRw', mode: 'audio', audio_format: 'mp3', embed: true, outdir: t.$('outdir').value });
+    const card = await t.until(() => { const c = document.querySelector('.job[data-id="' + job.id + '"]'); return c && c.querySelector('.state.done') && c; }, 90000);
+    t.ok(card.textContent.includes('MP3 best + tags'), 'label');
+    t.ok(card.querySelector('.file').textContent.endsWith('.mp3'), 'file row');
+  `],
 ];
 
 // ---------------------------------------------------------------------------

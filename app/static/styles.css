@@ -58,6 +58,7 @@ main { max-width: 860px; margin: 0 auto; padding: 0 16px 48px; }
   white-space: nowrap;
 }
 .chip.bad { color: var(--bad); border-color: currentColor; }
+.chip.warn { border-style: dashed; }
 
 .card {
   background: var(--panel);

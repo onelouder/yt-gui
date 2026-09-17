@@ -19,15 +19,20 @@ class Base(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name).resolve()
-        self._saved = (server.ALLOWED_ROOT, server.DEFAULT_OUTDIR, server.FFMPEG, server.FFPROBE, server.YTDLP)
+        self._saved = (server.ALLOWED_ROOT, server.DEFAULT_OUTDIR, server.FFMPEG, server.FFPROBE, server.YTDLP,
+                       server.ATOMICPARSLEY)
         server.ALLOWED_ROOT = self.root
         server.DEFAULT_OUTDIR = self.root / "dl"
         server.FFMPEG = "/usr/bin/ffmpeg"
         server.FFPROBE = "/usr/bin/ffprobe"
         server.YTDLP = "/usr/bin/yt-dlp"
+        self._mutagen = server.MUTAGEN
+        server.MUTAGEN = False  # never shell out to detect it in unit tests
 
     def tearDown(self):
-        (server.ALLOWED_ROOT, server.DEFAULT_OUTDIR, server.FFMPEG, server.FFPROBE, server.YTDLP) = self._saved
+        (server.ALLOWED_ROOT, server.DEFAULT_OUTDIR, server.FFMPEG, server.FFPROBE, server.YTDLP,
+         server.ATOMICPARSLEY) = self._saved
+        server.MUTAGEN = self._mutagen
         self._tmp.cleanup()
 
     def job(self, **kw):
@@ -197,6 +202,67 @@ class KeepOriginalTests(Base):
         files, notes = self._files(["a.orig.m4a", "a.m4a"], "a.m4a", "a.m4a")
         self.assertEqual([f["path"] for f in files], [str(self.root / "a.orig.m4a"), str(self.root / "a.m4a")])
         self.assertEqual(notes, [])
+
+
+class EmbedTests(Base):
+    def run_embed(self, fmt, mode="audio"):
+        job = self.job(mode=mode, audio_format=fmt, embed=True)
+        return self.argvs(job)[-1], job.tasks[-1].notes
+
+    def test_art_where_ffmpeg_can(self):
+        for fmt in ("mp3",):
+            with self.subTest(fmt=fmt):
+                argv, notes = self.run_embed(fmt)
+                self.assertIn("--embed-metadata", argv)
+                self.assertIn("--embed-thumbnail", argv)
+                self.assertEqual(argv[argv.index("--convert-thumbnails") + 1], "jpg")
+                self.assertEqual(notes, [])
+
+    def test_tags_only_where_art_would_fail(self):
+        server.ATOMICPARSLEY = None
+        expect = {"wav": "can't hold cover art", "opus": "mutagen", "flac": "mutagen", "m4a": "AtomicParsley",
+                  "native": "only embedded when converting"}
+        for fmt, text in expect.items():
+            with self.subTest(fmt=fmt):
+                argv, notes = self.run_embed(fmt)
+                self.assertIn("--embed-metadata", argv)
+                self.assertNotIn("--embed-thumbnail", argv)
+                self.assertIn(text, notes[0])
+
+    def test_keep_original_skips_thumbnail_conversion(self):
+        argv = self.argvs(self.job(mode="audio", audio_format="mp3", embed=True, keep_original=True))[0]
+        self.assertIn("--embed-thumbnail", argv)
+        self.assertNotIn("--convert-thumbnails", argv)
+
+    def test_atomicparsley_enables_m4a_art(self):
+        server.ATOMICPARSLEY = "/usr/bin/AtomicParsley"
+        argv, notes = self.run_embed("m4a")
+        self.assertIn("--embed-thumbnail", argv)
+        self.assertEqual(notes, [])
+
+    def test_hint_for_embed_failure(self):
+        hint = server.hint_for("ERROR: Postprocessing: Unable to embed using ffprobe & ffmpeg; Conversion failed!")
+        self.assertIn("Cover art", hint)
+
+    def test_mutagen_enables_opus_flac_art(self):
+        server.MUTAGEN = True
+        for fmt in ("opus", "flac", "m4a"):
+            with self.subTest(fmt=fmt):
+                argv, notes = self.run_embed(fmt)
+                self.assertIn("--embed-thumbnail", argv)
+                self.assertEqual(notes, [])
+
+    def test_only_audio_steps(self):
+        video, audio = self.argvs(self.job(mode="separate", audio_format="mp3", embed=True))
+        self.assertNotIn("--embed-metadata", video)
+        self.assertIn("--embed-metadata", audio)
+        job = self.job(mode="merged", embed=True)
+        self.assertFalse(job.embed)
+        self.assertNotIn("--embed-metadata", self.argvs(job)[0])
+
+    def test_rejects_non_bool(self):
+        with self.assertRaises(ValueError):
+            self.job(mode="audio", embed=1)
 
 
 class ValidationTests(Base):

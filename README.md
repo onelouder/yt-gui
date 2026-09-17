@@ -7,6 +7,7 @@ only), choose a folder, and download. Everything runs on your own machine.
 - **Standard library only:** one Python file for the server and a static page. Nothing to `pip install`, no build step.
 - **Four download modes** plus a quality cap (best / 1080p / 720p / 480p).
 - **Audio conversion** to **MP3**, **M4A**, **Opus** (choice of bitrate), **FLAC** or **WAV** using ffmpeg, or keep the original stream.
+- **Cover art and tags** (title, artist, chapters) embedded in the audio file.
 - **Live progress** for each file (percent, speed, ETA) over Server-Sent Events, and a cancel button.
 - **Clear errors**, with hints for bot checks, age limits, geo-blocking and missing ffmpeg.
 - **Safe by default:** binds to `127.0.0.1`, keeps output paths under an allowed root, and never passes input through a shell.
@@ -15,8 +16,11 @@ only), choose a folder, and download. Everything runs on your own machine.
 
 - Python 3.11+
 - [`yt-dlp`](https://github.com/yt-dlp/yt-dlp#installation) on `PATH`
-- [`ffmpeg`](https://ffmpeg.org/) and `ffprobe` on `PATH` (needed for Merged mode and
-  MP3/WAV conversion; the UI disables those options when they're missing)
+- [`ffmpeg`](https://ffmpeg.org/) and `ffprobe` on `PATH` (needed for Merged mode,
+  audio conversion and tagging; the UI disables those options when they're missing)
+- Optional: `mutagen` for yt-dlp's Python (`pacman -S python-mutagen`, or
+  `pip install mutagen` wherever yt-dlp is installed). It enables cover art in M4A,
+  Opus and FLAC. MP3 works without it.
 
 ## Quick start
 
