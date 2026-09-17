@@ -111,6 +111,7 @@ function syncMode() {
   const fmt = audioFormat($('audio-format').value);
   $('audio-format').disabled = !hasAudioFile;
   $('audio-quality').disabled = !hasAudioFile || !fmt?.bitrate_ok;
+  $('keep-original').disabled = !hasAudioFile || !fmt?.convert;
   const best = $('audio-quality').querySelector('option[value=best]');
   if (best) best.textContent = fmt?.best_label || 'Best';
   let audioHint = hasAudioFile ? (AUDIO_HINTS[fmt?.key] || '') : 'Audio format applies to Audio only and Separate modes.';
@@ -147,7 +148,11 @@ function renderTask(task) {
   track.append(fill);
   wrap.append(track);
 
-  if (task.filepath) wrap.append(el('div', 'file', task.filepath));
+  if (task.files?.length > 1) {
+    task.files.forEach((f) => wrap.append(el('div', 'file', `${f.role}: ${f.path}`)));
+  } else if (task.filepath) {
+    wrap.append(el('div', 'file', task.filepath));
+  }
   (task.notes || []).forEach((n) => wrap.append(el('p', 'note', n)));
   if (task.error) wrap.append(el('p', 'error', task.error));
   return wrap;
@@ -190,6 +195,7 @@ function renderJob(job) {
     $('quality').value = job.quality;
     $('audio-format').value = job.audio_format || 'native';
     $('audio-quality').value = job.audio_quality || 'best';
+    $('keep-original').checked = !!job.keep_original;
     $('outdir').value = job.outdir;
     syncMode();
     $('url').focus();
@@ -251,6 +257,7 @@ form.addEventListener('submit', async (e) => {
     quality: $('quality').value,
     audio_format: $('audio-format').value,
     audio_quality: $('audio-quality').value,
+    keep_original: !$('keep-original').disabled && $('keep-original').checked,
     outdir: $('outdir').value.trim(),
   };
 

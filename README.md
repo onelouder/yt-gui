@@ -55,6 +55,7 @@ python3 app/server.py --port 9000 \
 | FLAC | Lossless |
 | WAV | 16-bit PCM, uncompressed |
 
+Tick **Keep original file** to keep the untouched download next to the converted one.
 If the source already uses the chosen codec, the stream is copied without re-encoding
 and the job card says so.
 

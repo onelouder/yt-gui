@@ -83,6 +83,16 @@ SCENARIOS = [
       [{"ext": "flac", "streams": ["audio:flac"]}], files=1),
     S("archive-mp3-copy", {"url": ARCHIVE, "mode": "audio", "audio_format": "mp3"},
       [{"ext": "mp3", "streams": ["audio:mp3"], "note": "already MP3"}], files=1),
+    # -- sprint 3: keep original ---------------------------------------------
+    S("mp3-keep", {"url": YT, "mode": "audio", "audio_format": "mp3", "keep_original": True},
+      [{"ext": "mp3", "streams": ["audio:mp3"],
+        "task_files": [{"role": "original", "ext": "webm", "streams": ["audio:opus"]},
+                       {"role": "converted", "ext": "mp3", "streams": ["audio:mp3"]}]}], files=2),
+    S("separate-flac-keep", {"url": YT, "mode": "separate", "quality": "480", "audio_format": "flac",
+                             "keep_original": True},
+      [{"streams": ["video:*"]}, {"ext": "flac", "streams": ["audio:flac"]}], files=3),
+    S("archive-mp3-keep-nothing", {"url": ARCHIVE, "mode": "audio", "audio_format": "mp3", "keep_original": True},
+      [{"ext": "mp3", "note": "no separate original"}], files=1),
     S("bad-bitrate-rejected", {"url": YT, "mode": "audio", "audio_format": "mp3", "audio_quality": "999"},
       [], http=400),
 ]
@@ -185,6 +195,13 @@ def check_job(sc: dict, job: dict, scdir: Path) -> list[str]:
             continue
         if task.get("filepath"):
             errs += [f"task {i} ({task['label']}): {e}" for e in check_file(task["filepath"], exp)]
+        if "task_files" in exp:
+            got = task.get("files") or []
+            if [f["role"] for f in got] != [f["role"] for f in exp["task_files"]]:
+                errs.append(f"task {i}: file roles {[f['role'] for f in got]} != {[f['role'] for f in exp['task_files']]}")
+            else:
+                for f, fexp in zip(got, exp["task_files"]):
+                    errs += [f"task {i} {f['role']}: {e}" for e in check_file(f["path"], fexp)]
         notes = " | ".join(task.get("notes") or [])
         if "note" in exp and exp["note"] not in notes:
             errs.append(f"task {i}: note {exp['note']!r} not in {notes!r}")

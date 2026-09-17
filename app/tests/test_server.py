@@ -156,6 +156,49 @@ class FormatTests(Base):
         self.assertIsNone(server.source_note(native, "opus", "webm"))
 
 
+class KeepOriginalTests(Base):
+    def test_flag_only_when_converting(self):
+        argv = self.argvs(self.job(mode="audio", audio_format="mp3", keep_original=True))[0]
+        self.assertIn("-k", argv)
+        for kw in ({"mode": "audio"}, {"mode": "merged", "audio_format": "mp3"}):
+            with self.subTest(**kw):
+                job = self.job(keep_original=True, **kw)
+                self.assertFalse(job.keep_original)
+                self.assertTrue(all("-k" not in a for a in self.argvs(job)))
+
+    def test_separate_keeps_only_audio(self):
+        video, audio = self.argvs(self.job(mode="separate", audio_format="flac", keep_original=True))
+        self.assertNotIn("-k", video)
+        self.assertIn("-k", audio)
+
+    def test_rejects_non_bool(self):
+        with self.assertRaises(ValueError):
+            self.job(mode="audio", audio_format="mp3", keep_original="yes")
+
+    def _files(self, names, source, final, keep=True):
+        for n in names:
+            (self.root / n).write_bytes(b"x")
+        step = self.job(mode="audio", audio_format="mp3", keep_original=keep).plan[0]
+        step.task.source_path = str(self.root / source)
+        step.task.filepath = str(self.root / final)
+        return server.collect_files(step, step.task), step.task.notes
+
+    def test_collect_both(self):
+        files, notes = self._files(["a.webm", "a.mp3"], "a.webm", "a.mp3")
+        self.assertEqual([f["role"] for f in files], ["original", "converted"])
+        self.assertEqual(notes, [])
+
+    def test_collect_copy_in_place(self):
+        files, notes = self._files(["a.mp3"], "a.mp3", "a.mp3")
+        self.assertEqual(len(files), 1)
+        self.assertIn("no separate original", notes[0])
+
+    def test_collect_orig_rename(self):
+        files, notes = self._files(["a.orig.m4a", "a.m4a"], "a.m4a", "a.m4a")
+        self.assertEqual([f["path"] for f in files], [str(self.root / "a.orig.m4a"), str(self.root / "a.m4a")])
+        self.assertEqual(notes, [])
+
+
 class ValidationTests(Base):
     def assertRejected(self, **kw):
         with self.assertRaises(ValueError):

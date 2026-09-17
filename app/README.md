@@ -58,7 +58,13 @@ usually Opus; archive.org often serves MP3), yt-dlp copies the stream instead of
 re-encoding it, so no quality is lost and the bitrate isn't applied. yt-dlp prints the
 source codec (`-O video:%(acodec)s`), and the task shows a note when this happens.
 
-yt-dlp downloads the best audio stream, runs ffmpeg, and deletes the source file.
+**Keep original file** (`-k`) leaves the downloaded source next to the converted file,
+e.g. `….audio.webm` + `….audio.mp3`. yt-dlp reports the pre-conversion path
+(`-O post_process:%(filepath)s`) and the task lists both files with their role. When
+there's nothing separate to keep (the source already had the target codec and file
+type), the task says so.
+
+Without it, yt-dlp downloads the best audio stream, runs ffmpeg, and deletes the source file.
 The task shows `converting` while ffmpeg runs. Converting to MP3 from Opus/AAC is
 lossy-to-lossy; pick Original if you want the untouched stream.
 
@@ -71,7 +77,7 @@ Same result, one less way to express the same thing.
 | Method | Path | Notes |
 |---|---|---|
 | `GET` | `/api/config` | ffmpeg presence, yt-dlp version, default/allowed paths, concurrency cap |
-| `POST` | `/api/jobs` | `{url, mode, quality, audio_format, audio_quality, outdir}` → job (`audio_format`: `native`/`mp3`/`m4a`/`opus`/`flac`/`wav`; `audio_quality`: `best`/`320`/`192`/`128`), or `400` with a readable `error` |
+| `POST` | `/api/jobs` | `{url, mode, quality, audio_format, audio_quality, keep_original, outdir}` → job (`audio_format`: `native`/`mp3`/`m4a`/`opus`/`flac`/`wav`; `audio_quality`: `best`/`320`/`192`/`128`), or `400` with a readable `error` |
 | `GET` | `/api/jobs` | `{version, jobs: [...]}` newest first |
 | `GET` | `/api/jobs/{id}` | one job |
 | `POST` | `/api/jobs/{id}/cancel` | SIGTERMs the process group |

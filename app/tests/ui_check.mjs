@@ -81,6 +81,24 @@ const CHECKS = [
     const note = await t.until(() => document.querySelector('.job[data-id="' + job.id + '"] .note'), 60000);
     t.ok(note.textContent.includes('bitrate not applied'), 'note text: ' + note.textContent);
   `],
+  ['keep: checkbox enabled only when converting, restored by "Use these settings"', `
+    t.mode('merged'); t.ok(t.$('keep-original').disabled, 'merged disables keep');
+    t.mode('audio'); t.set('audio-format', 'native'); t.ok(t.$('keep-original').disabled, 'original disables keep');
+    t.set('audio-format', 'flac'); t.ok(!t.$('keep-original').disabled, 'flac enables keep');
+    t.mode('separate'); t.ok(!t.$('keep-original').disabled, 'separate+flac enables keep');
+    const job = await t.post({ url: 'https://example.invalid/y', mode: 'audio', audio_format: 'mp3', keep_original: true, outdir: t.$('outdir').value });
+    const card = await t.until(() => document.querySelector('.job[data-id="' + job.id + '"]'));
+    t.ok(card.textContent.includes('+ original'), 'card label shows + original');
+    t.set('keep-original', false); t.mode('merged');
+    [...card.querySelectorAll('button')].find((b) => b.textContent === 'Use these settings').click();
+    t.ok(t.$('keep-original').checked && !t.$('keep-original').disabled, 'keep restored');
+  `],
+  ['keep: card lists original and converted files (live download)', `
+    const job = await t.post({ url: 'https://www.youtube.com/watch?v=jNQXAC9IVRw', mode: 'audio', audio_format: 'mp3', keep_original: true, outdir: t.$('outdir').value });
+    const files = await t.until(() => { const f = document.querySelectorAll('.job[data-id="' + job.id + '"] .file'); return f.length === 2 && f; }, 90000);
+    t.ok(files[0].textContent.startsWith('original: ') && files[0].textContent.endsWith('.webm'), 'original row: ' + files[0].textContent);
+    t.ok(files[1].textContent.startsWith('converted: ') && files[1].textContent.endsWith('.mp3'), 'converted row: ' + files[1].textContent);
+  `],
 ];
 
 // ---------------------------------------------------------------------------

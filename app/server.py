@@ -38,6 +38,7 @@ P = "@@P@@"
 PP = "@@PP@@"
 F = "@@F@@"
 SRC = "@@S@@"
+ORIG = "@@O@@"
 
 PROGRESS_TMPL = (
     "download:" + P + "%(progress.status)s|%(progress.downloaded_bytes)s|"
@@ -172,6 +173,8 @@ class Task:
         self.speed = None
         self.eta = None
         self.filepath = None
+        self.source_path = None  # downloaded file before postprocessing
+        self.files: list[dict] = []
         self.error = None
         self.notes: list[str] = []
 
@@ -194,19 +197,22 @@ class Task:
             "speed": self.speed,
             "eta": self.eta,
             "filepath": self.filepath,
+            "files": self.files,
             "error": self.error,
             "notes": self.notes,
         }
 
 
 class Job:
-    def __init__(self, url, mode, quality, audio_format, audio_quality, outdir: Path):
+    def __init__(self, url, mode, quality, audio_format, audio_quality, outdir: Path,
+                 keep_original=False):
         self.id = uuid.uuid4().hex[:12]
         self.url = url
         self.mode = mode
         self.quality = quality
         self.audio_format = audio_format
         self.audio_quality = audio_quality
+        self.keep_original = keep_original
         self.outdir = str(outdir)
         self.title = None
         self.state = "queued"
@@ -245,7 +251,9 @@ class Job:
             "audio_format": self.audio_format,
             "audio_format_label": AUDIO_FORMATS[self.audio_format].label,
             "audio_quality": self.audio_quality,
-            "audio_label": audio_label(self.audio_format, self.audio_quality),
+            "audio_label": audio_label(self.audio_format, self.audio_quality)
+                           + (" + original" if self.keep_original else ""),
+            "keep_original": self.keep_original,
             "outdir": self.outdir,
             "title": self.title,
             "state": self.state,
@@ -311,6 +319,7 @@ def base_argv() -> list[str]:
         "--progress-template", PROGRESS_TMPL,
         "--progress-template", POSTPROC_TMPL,
         "-O", "video:" + SRC + "%(acodec)s|%(ext)s",
+        "-O", "post_process:" + ORIG + "%(filepath)s",
         "-O", "after_move:" + F + "%(filepath)s",
     ]
 
@@ -400,6 +409,7 @@ class Step:
     extra: list[str] = field(default_factory=list)
     audio: AudioFormat | None = None  # set when this step converts audio
     audio_quality: str = "best"
+    keep_original: bool = False
 
 
 def task_argv(job: Job, step: Step) -> list[str]:
@@ -456,6 +466,8 @@ def run_task(job: Job, step: Step) -> None:
                 if note:
                     task.notes.append(note)
                 bump()
+            elif line.startswith(ORIG):
+                task.source_path = line[len(ORIG):].strip()
             elif line.startswith(F):
                 task.filepath = line[len(F):].strip()
                 bump()
@@ -477,6 +489,7 @@ def run_task(job: Job, step: Step) -> None:
         raise RuntimeError(msg)
 
     task.state = "done"
+    task.files = collect_files(step, task)
     if task.total and task.downloaded < task.total:
         task.downloaded = task.total
     task.speed = None
@@ -541,6 +554,25 @@ def extract_argv(fmt: AudioFormat, quality: str) -> list[str]:
     return argv
 
 
+def collect_files(step: Step, task: Task) -> list[dict]:
+    """The files a finished task left on disk, with their role."""
+    files = []
+    final = task.filepath
+    if step.keep_original and task.source_path:
+        src = Path(task.source_path)
+        # re-encoding to the same extension makes yt-dlp rename the source <name>.orig.<ext>
+        orig = src.with_name(f"{src.stem}.orig{src.suffix}")
+        if orig.exists():
+            files.append({"path": str(orig), "role": "original"})
+        elif task.source_path != final and src.exists():
+            files.append({"path": str(src), "role": "original"})
+    if final:
+        files.append({"path": final, "role": "converted" if step.audio else "download"})
+    if step.keep_original and len(files) < 2:
+        task.notes.append("The download was already the final file, so there is no separate original to keep.")
+    return files
+
+
 def source_note(step: Step, acodec: str, ext: str) -> str | None:
     """Explain when yt-dlp will stream-copy instead of encoding what was asked."""
     fmt = step.audio
@@ -556,8 +588,9 @@ def audio_step(job: Job) -> Step:
         t = Task("audio", f"Audio \u2192 {audio_label(fmt.key, job.audio_quality)}", "converting")
         # -x picks the final extension itself, so %(ext)s ends up .mp3/.wav.
         # Any file with an audio track will do; ffmpeg drops the video.
+        extra = extract_argv(fmt, job.audio_quality) + (["-k"] if job.keep_original else [])
         return Step(t, f"{AUDIO_SELECTOR}/best", f"{STEM}.audio.%(ext)s",
-                    extract_argv(fmt, job.audio_quality), fmt, job.audio_quality)
+                    extra, fmt, job.audio_quality, job.keep_original)
     return Step(Task("audio", "Audio"), AUDIO_SELECTOR, f"{STEM}.audio.%(ext)s")
 
 
@@ -636,6 +669,7 @@ def new_job(data: dict) -> Job:
     quality = str(data.get("quality") or "best")
     audio_format = str(data.get("audio_format") or "native")
     audio_quality = str(data.get("audio_quality") or "best")
+    keep_original = data.get("keep_original", False)
     outdir_raw = str(data.get("outdir") or "")
 
     if not url:
@@ -655,15 +689,19 @@ def new_job(data: dict) -> Job:
         raise ValueError(f"Unknown audio quality: {audio_quality}")
     if mode not in ("audio", "separate"):
         audio_format = "native"  # only audio outputs are converted
+    if not isinstance(keep_original, bool):
+        raise ValueError("keep_original must be true or false.")
     if not AUDIO_FORMATS[audio_format].bitrate_ok:
         audio_quality = "best"  # lossless or untouched: a bitrate means nothing
+    if not AUDIO_FORMATS[audio_format].codec:
+        keep_original = False  # nothing is converted, so the download is the original
     if AUDIO_FORMATS[audio_format].codec and not (FFMPEG and FFPROBE):
         raise ValueError(
             f"Converting to {AUDIO_FORMATS[audio_format].label} needs ffmpeg and ffprobe on PATH."
         )
 
     outdir = validate_outdir(outdir_raw or str(DEFAULT_OUTDIR))
-    job = Job(url, mode, quality, audio_format, audio_quality, outdir)
+    job = Job(url, mode, quality, audio_format, audio_quality, outdir, keep_original)
     job.plan = build_plan(job)
     job.tasks = [step.task for step in job.plan]
     return job
