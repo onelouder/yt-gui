@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 import uuid
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -175,7 +176,7 @@ class Job:
         self.error = None
         self.created = time.time()
         self.tasks: list[Task] = []
-        self.plan: list[tuple[Task, str, str, list[str]]] = []
+        self.plan: list[Step] = []
         self.cancelled = False
         self._proc = None
         self._lock = threading.Lock()
@@ -350,13 +351,27 @@ def hint_for(msg: str):
     return None
 
 
-def run_task(job: Job, task: Task, fmt: str, outtmpl: str, extra: list[str]) -> None:
-    argv = base_argv() + extra + [
-        "-f", fmt,
+@dataclass
+class Step:
+    """One yt-dlp invocation: the task it reports into and how to run it."""
+    task: Task
+    fmt: str
+    outtmpl: str
+    extra: list[str] = field(default_factory=list)
+
+
+def task_argv(job: Job, step: Step) -> list[str]:
+    return base_argv() + step.extra + [
+        "-f", step.fmt,
         "-P", job.outdir,
-        "-o", outtmpl,
+        "-o", step.outtmpl,
         "--", job.url,
     ]
+
+
+def run_task(job: Job, step: Step) -> None:
+    task = step.task
+    argv = task_argv(job, step)
     task.state = "downloading"
     bump()
 
@@ -454,33 +469,41 @@ class Cancelled(Exception):
     pass
 
 
-def audio_task(job: Job) -> tuple[Task, str, str, list[str]]:
-    stem = "%(title)s [%(id)s]"
+STEM = "%(title)s [%(id)s]"
+
+# Some extractors (archive.org) leave codecs unset, so plain `bestaudio` matches
+# nothing; fall back to a single-file format that looks like audio by extension.
+AUDIO_SELECTOR = (
+    "bestaudio/best[vcodec=?none][ext~='^(mp3|m4a|aac|ogg|oga|opus|flac|wav|weba)$']"
+)
+
+
+def audio_step(job: Job) -> Step:
     convert = AUDIO_FORMATS[job.audio_format]
     if convert:
         t = Task("audio", f"Audio \u2192 {AUDIO_FORMAT_LABELS[job.audio_format]}", "converting")
         # -x picks the final extension itself, so %(ext)s ends up .mp3/.wav
-        return (t, "bestaudio/best", f"{stem}.audio.%(ext)s", convert)
-    return (Task("audio", "Audio"), "bestaudio", f"{stem}.audio.%(ext)s", [])
+        # converting: any file with an audio track will do, ffmpeg drops the video
+        return Step(t, f"{AUDIO_SELECTOR}/best", f"{STEM}.audio.%(ext)s", list(convert))
+    return Step(Task("audio", "Audio"), AUDIO_SELECTOR, f"{STEM}.audio.%(ext)s")
 
 
-def build_plan(job: Job) -> list[tuple[Task, str, str, list[str]]]:
-    """(task, format selector, output template, extra argv) per file to produce."""
-    stem = "%(title)s [%(id)s]"
+def video_step(job: Job) -> Step:
+    t = Task("video", "Video (no audio)")
+    return Step(t, fmt_for(job.mode, job.quality, "video"), f"{STEM}.video.%(ext)s")
+
+
+def build_plan(job: Job) -> list[Step]:
+    """One Step per file to produce."""
     if job.mode == "merged":
         t = Task("merged", "Video + audio")
-        return [(t, fmt_for(job.mode, job.quality, "merged"), f"{stem}.%(ext)s", [])]
+        return [Step(t, fmt_for(job.mode, job.quality, "merged"), f"{STEM}.%(ext)s")]
     if job.mode == "audio":
-        return [audio_task(job)]
+        return [audio_step(job)]
     if job.mode == "video":
-        t = Task("video", "Video (no audio)")
-        return [(t, fmt_for(job.mode, job.quality, "video"), f"{stem}.video.%(ext)s", [])]
+        return [video_step(job)]
     # separate: two independent runs, never combined, so yt-dlp cannot merge them
-    tv = Task("video", "Video (no audio)")
-    return [
-        (tv, fmt_for(job.mode, job.quality, "video"), f"{stem}.video.%(ext)s", []),
-        audio_task(job),
-    ]
+    return [video_step(job), audio_step(job)]
 
 
 def run_job(job: Job) -> None:
@@ -509,10 +532,10 @@ def run_job(job: Job) -> None:
 
             job.state = "downloading"
             bump()
-            for task, fmt, outtmpl, extra in job.plan:
+            for step in job.plan:
                 if job.cancelled:
                     raise Cancelled()
-                run_task(job, task, fmt, outtmpl, extra)
+                run_task(job, step)
 
             job.state = "done"
         except Cancelled:
@@ -533,8 +556,14 @@ def run_job(job: Job) -> None:
             bump()
 
 
-def create_job(url: str, mode: str, quality: str, audio_format: str, outdir_raw: str) -> Job:
-    url = (url or "").strip()
+def new_job(data: dict) -> Job:
+    """Validate a POST /api/jobs body and build the job (not yet started)."""
+    url = str(data.get("url") or "").strip()
+    mode = str(data.get("mode") or "merged")
+    quality = str(data.get("quality") or "best")
+    audio_format = str(data.get("audio_format") or "native")
+    outdir_raw = str(data.get("outdir") or "")
+
     if not url:
         raise ValueError("URL is required.")
     parsed = urlparse(url)
@@ -558,8 +587,11 @@ def create_job(url: str, mode: str, quality: str, audio_format: str, outdir_raw:
     outdir = validate_outdir(outdir_raw or str(DEFAULT_OUTDIR))
     job = Job(url, mode, quality, audio_format, outdir)
     job.plan = build_plan(job)
-    job.tasks = [step[0] for step in job.plan]
+    job.tasks = [step.task for step in job.plan]
+    return job
 
+
+def submit_job(job: Job) -> Job:
     with JOBS_LOCK:
         JOBS[job.id] = job
         JOBS_ORDER.append(job.id)
@@ -649,13 +681,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/jobs":
             data = self.read_json()
             try:
-                job = create_job(
-                    data.get("url", ""),
-                    data.get("mode", "merged"),
-                    str(data.get("quality", "best")),
-                    str(data.get("audio_format", "native")),
-                    data.get("outdir", ""),
-                )
+                job = submit_job(new_job(data))
             except (ValueError, PathError) as exc:
                 self.send_json({"error": str(exc)}, 400)
                 return

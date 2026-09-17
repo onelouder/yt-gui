@@ -80,6 +80,17 @@ Same result, one less way to express the same thing.
 3. **Cancel** — each process is spawned in its own session and cancelled with
    `killpg(SIGTERM)`. A `.part` file may remain; nothing larger.
 
+## Tests
+
+```sh
+python3 -m unittest discover app/tests   # offline, < 1 s
+python3 app/tests/smoke.py               # live: real downloads, checked with ffprobe
+python3 app/tests/smoke.py -k mp3        # only scenarios whose name contains "mp3"
+```
+
+The live tests start their own server on a free port with a temp folder, so they
+don't touch a running instance. Test URLs are in `app/tests/fixtures.json`.
+
 ## Security
 
 - Binds `127.0.0.1`; requests with a non-local `Host` header are rejected (blunt

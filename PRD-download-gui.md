@@ -134,3 +134,19 @@ browser ──HTTP──▶ local server (Python, stdlib http.server or FastAPI)
 | M1 | All 4 modes + quality preset + output-path validation. |
 | M2 | Frontend: form, job cards, progress, cancel, error display. |
 | M3 | Hardening: concurrency cap, path whitelist, ffprobe-free error hints, README. |
+
+## 12. v2 Scope (2026-09-17)
+
+v2 moves some §3 non-goals into scope. Details, order and checks are in
+[`SPRINT-PLAN-v2.md`](SPRINT-PLAN-v2.md).
+
+| Feature | Was |
+|---|---|
+| Audio conversion: MP3, WAV, FLAC, M4A, Opus, with bitrate choice | §3 "format remux/convert" non-goal |
+| Keep the original stream next to the converted file | new |
+| Embed cover art and tags | §3 "thumbnails" non-goal |
+| Playlist downloads (opt-in, capped, per-item failures) | §3 "playlist batches" non-goal |
+| Job history kept across server restarts | §10 open question, now answered: persist to JSON |
+
+Still out of scope: cookies/login, subtitles, SponsorBlock, trimming, network deployment.
+
